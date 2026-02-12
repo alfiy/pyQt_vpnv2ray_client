@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-source .venv/bin/activate
-
-python3 main.py
+python main.py

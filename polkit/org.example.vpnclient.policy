@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+
+<policyconfig>
+  <vendor>Example VPN Client</vendor>
+  <vendor_url>https://example.com</vendor_url>
+
+  <!-- 启动 VPN 服务的权限策略 -->
+  <action id="org.example.vpnclient.start">
+    <description>Start VPN and V2Ray services</description>
+    <message>Authentication is required to start VPN services</message>
+    <message xml:lang="zh_CN">启动 VPN 服务需要认证</message>
+    <icon_name>network-vpn</icon_name>
+    
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/vpn-helper.py</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <!-- 停止 VPN 服务的权限策略 -->
+  <action id="org.example.vpnclient.stop">
+    <description>Stop VPN and V2Ray services</description>
+    <message>Authentication is required to stop VPN services</message>
+    <message xml:lang="zh_CN">停止 VPN 服务需要认证</message>
+    <icon_name>network-vpn</icon_name>
+    
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/vpn-helper.py</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
