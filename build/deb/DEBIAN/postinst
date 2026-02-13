@@ -1,0 +1,24 @@
+#!/bin/bash
+set -e
+
+# Make launcher executable
+chmod +x /usr/local/bin/pyqt-vpnv2ray-client || true
+
+# Create symlink for convenience
+ln -sf /usr/local/lib/pyqt-vpnv2ray-client /opt/pyqt-vpnv2ray-client || true
+
+# Install polkit files
+if [ -d "/usr/local/lib/pyqt-vpnv2ray-client/polkit" ]; then
+    cp /usr/local/lib/pyqt-vpnv2ray-client/polkit/*.policy /usr/share/polkit-1/actions/ 2>/dev/null || true
+    cp /usr/local/lib/pyqt-vpnv2ray-client/polkit/*.py /usr/local/bin/ 2>/dev/null || true
+    chmod +x /usr/local/bin/vpn-helper.py 2>/dev/null || true
+fi
+
+# Update desktop database
+update-desktop-database /usr/share/applications || true
+
+# Install Python dependencies
+pip3 install -q -r /usr/local/lib/pyqt-vpnv2ray-client/requirements.txt 2>/dev/null || python3 -m pip install -q -r /usr/local/lib/pyqt-vpnv2ray-client/requirements.txt || true
+
+echo "Installation completed successfully!"
+echo "Run 'pyqt-vpnv2ray-client' to start the application"

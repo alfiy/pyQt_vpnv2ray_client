@@ -1,0 +1,8 @@
+#!/bin/bash
+set -e
+
+# Remove polkit files
+rm -f /usr/share/polkit-1/actions/org.example.vpnclient.policy 2>/dev/null || true
+rm -f /usr/local/bin/vpn-helper.py 2>/dev/null || true
+
+echo "Pre-removal tasks completed"

@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import sys
+import os
+
+# Add application directory to path
+app_dir = "/usr/local/lib/pyqt-vpnv2ray-client"
+sys.path.insert(0, app_dir)
+
+# Change to application directory
+os.chdir(app_dir)
+
+# Import and run main application
+from main import main
+
+if __name__ == "__main__":
+    main()
