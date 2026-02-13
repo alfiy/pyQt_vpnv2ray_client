@@ -1,0 +1,164 @@
+#!/bin/bash
+# ov2n Diagnostic Tool
+
+echo ""
+echo "╔═══════════════════════════════════════╗"
+echo "║   ov2n - Diagnostic Tool              ║"
+echo "╚═══════════════════════════════════════╝"
+echo ""
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "System Information"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# OS Information
+echo "OS:"
+lsb_release -ds 2>/dev/null || cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2
+echo ""
+
+# Python version
+echo "Python:"
+python3 --version
+echo ""
+
+# Check PyQt5 installation
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "PyQt5 Installation Check"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+check_pyqt5() {
+    python3 -c "import PyQt5; print(f'PyQt5 version: {PyQt5.QtCore.QT_VERSION_STR}')" 2>/dev/null && return 0 || return 1
+}
+
+if check_pyqt5; then
+    echo "✓ PyQt5 is installed"
+else
+    echo "✗ PyQt5 is NOT installed"
+    echo "  Install with: sudo apt install python3-pyqt5"
+fi
+
+# Check Qt libraries
+echo ""
+echo "Qt Libraries:"
+dpkg -l | grep "^ii.*libqt5" | head -5
+if [ $? -eq 0 ]; then
+    echo "✓ Qt libraries found"
+else
+    echo "✗ Qt libraries NOT found"
+    echo "  Install with: sudo apt install libqt5gui5"
+fi
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "ov2n Installation Check"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# Check if ov2n is installed
+if dpkg -l | grep -q "^ii.*ov2n"; then
+    echo "✓ ov2n package is installed"
+    dpkg -l | grep "^ii.*ov2n"
+else
+    echo "✗ ov2n package is NOT installed"
+fi
+
+# Check ov2n files
+echo ""
+echo "ov2n Files:"
+if [ -f "/usr/local/bin/ov2n" ]; then
+    echo "✓ /usr/local/bin/ov2n exists"
+else
+    echo "✗ /usr/local/bin/ov2n NOT found"
+fi
+
+if [ -d "/usr/local/lib/ov2n" ]; then
+    echo "✓ /usr/local/lib/ov2n directory exists"
+    echo "  Contents:"
+    ls -la /usr/local/lib/ov2n/ | grep -E "^-|^d" | head -10
+else
+    echo "✗ /usr/local/lib/ov2n directory NOT found"
+fi
+
+# Check main.py
+if [ -f "/usr/local/lib/ov2n/main.py" ]; then
+    echo "✓ main.py exists"
+else
+    echo "✗ main.py NOT found"
+fi
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Dependencies Check"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+DEPS=("python3" "python3-pyqt5" "python3-pip" "openvpn" "policykit-1")
+
+for dep in "${DEPS[@]}"; do
+    if dpkg -l | grep -q "^ii.*$dep"; then
+        echo "✓ $dep is installed"
+    else
+        echo "✗ $dep is NOT installed"
+    fi
+done
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Environment Variables"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+echo "DISPLAY: $DISPLAY"
+echo "QT_QPA_PLATFORM: ${QT_QPA_PLATFORM:-not set}"
+echo "QT_QPA_PLATFORM_PLUGIN_PATH: ${QT_QPA_PLATFORM_PLUGIN_PATH:-not set}"
+echo ""
+
+# Test PyQt5 import
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "PyQt5 Import Test"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+python3 << 'EOF'
+import sys
+import traceback
+
+modules = [
+    'PyQt5',
+    'PyQt5.QtCore',
+    'PyQt5.QtGui',
+    'PyQt5.QtWidgets',
+]
+
+for module in modules:
+    try:
+        __import__(module)
+        print(f"✓ {module} imported successfully")
+    except Exception as e:
+        print(f"✗ {module} import failed:")
+        print(f"  {e}")
+        traceback.print_exc()
+
+print()
+EOF
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Diagnostic Complete"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "If there are issues, try:"
+echo ""
+echo "1. Reinstall PyQt5:"
+echo "   sudo apt install --reinstall python3-pyqt5"
+echo ""
+echo "2. Update system packages:"
+echo "   sudo apt update && sudo apt upgrade"
+echo ""
+echo "3. Reinstall ov2n:"
+echo "   sudo apt remove ov2n"
+echo "   ./build.sh 1.0.1"
+echo "   sudo dpkg -i dist/ov2n_1.0.1_all.deb"
+echo ""

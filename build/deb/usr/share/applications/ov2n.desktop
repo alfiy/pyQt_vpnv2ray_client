@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=ov2n
+GenericName=VPN Client
+Comment=Integrated OpenVPN and V2Ray/Xray Client
+Exec=ov2n
+Icon=ov2n
+Categories=Network;Utility;System;
+Terminal=false
+StartupNotify=true
+Keywords=vpn;openvpn;v2ray;xray;proxy;network;security;
+
+[Desktop Action Help]
+Name=Help
+Exec=xdg-open https://github.com/alfiy/pyQt_vpnv2ray_client

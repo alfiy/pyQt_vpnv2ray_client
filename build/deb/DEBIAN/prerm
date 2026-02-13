@@ -1,8 +1,16 @@
 #!/bin/bash
 set -e
 
+PKG_NAME="ov2n"
+
+echo "Cleaning up ${PKG_NAME}..."
+
 # Remove polkit files
 rm -f /usr/share/polkit-1/actions/org.example.vpnclient.policy 2>/dev/null || true
 rm -f /usr/local/bin/vpn-helper.py 2>/dev/null || true
 
-echo "Pre-removal tasks completed"
+# Remove symlink
+rm -f /opt/${PKG_NAME} 2>/dev/null || true
+
+echo "✓ Pre-removal cleanup completed"
+exit 0

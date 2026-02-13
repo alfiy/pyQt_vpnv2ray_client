@@ -1,5 +1,6 @@
 #!/bin/bash
 # Build script for creating DEB packages on Linux
+# Project: ov2n - OpenVPN + V2Ray Client
 # Usage: ./build.sh [version] [distro]
 
 set -e
@@ -8,218 +9,415 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Default values
 VERSION="${1:-1.0.0}"
-DISTRO="${2:-focal}"  # focal, bionic, jammy, bullseye, bookworm, etc.
-PKG_NAME="pyqt-vpnv2ray-client"
-MAINTAINER="Your Name <your.email@example.com>"
+DISTRO="${2:-focal}"
+PKG_NAME="ov2n"  # 小写，debian 包名必须小写
+APP_NAME="ov2n"
+APP_TITLE="ov2n - VPN Client"
+MAINTAINER="Alfiy <your.email@example.com>"
 BUILD_DIR="build"
 DEB_BUILD_DIR="${BUILD_DIR}/deb"
 DIST_DIR="dist"
 
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}PyQt VPN V2Ray Client - DEB Builder${NC}"
-echo -e "${GREEN}========================================${NC}"
+echo -e "${BLUE}"
+echo "╔════════════════════════════════════════╗"
+echo "║       ov2n - VPN Client Builder       ║"
+echo "║  OpenVPN + V2Ray/Xray Integration    ║"
+echo "╚════════════════════════════════════════╝"
+echo -e "${NC}"
 echo ""
-echo "Version: $VERSION"
-echo "Distribution: $DISTRO"
+echo -e "${BLUE}Version:${NC} $VERSION"
+echo -e "${BLUE}Distribution:${NC} $DISTRO"
 echo ""
 
 # Step 1: Check dependencies
-echo -e "${YELLOW}Step 1/6: Checking dependencies...${NC}"
+echo -e "${YELLOW}[1/8] Checking dependencies...${NC}"
 check_command() {
     if ! command -v $1 &> /dev/null; then
         echo -e "${RED}✗ $1 is not installed${NC}"
-        echo "Please install $1 and try again"
+        echo "      Please install $1 and try again"
         exit 1
     fi
-    echo -e "${GREEN}✓ $1 found${NC}"
+    echo -e "${GREEN}  ✓ $1 found${NC}"
 }
 
 check_command "python3"
 check_command "dpkg"
 check_command "fakeroot"
 
-# Check for build-essential (optional but recommended)
-if ! dpkg -l | grep -q build-essential; then
-    echo -e "${YELLOW}⚠ build-essential not installed (optional)${NC}"
-    echo "  Run: sudo apt-get install build-essential"
+echo ""
+
+# Step 2: Check source files
+echo -e "${YELLOW}[2/8] Checking source files...${NC}"
+if [ ! -f "main.py" ]; then
+    echo -e "${RED}✗ main.py not found in current directory${NC}"
+    exit 1
 fi
+echo -e "${GREEN}  ✓ main.py found${NC}"
+
+if [ ! -f "requirements.txt" ]; then
+    echo -e "${RED}✗ requirements.txt not found in current directory${NC}"
+    exit 1
+fi
+echo -e "${GREEN}  ✓ requirements.txt found${NC}"
 
 echo ""
 
-# Step 2: Clean and prepare directories
-echo -e "${YELLOW}Step 2/6: Preparing build directories...${NC}"
+# Step 3: Clean and prepare directories
+echo -e "${YELLOW}[3/8] Preparing build directories...${NC}"
 rm -rf "${DEB_BUILD_DIR}"
 mkdir -p "${DEB_BUILD_DIR}/DEBIAN"
 mkdir -p "${DEB_BUILD_DIR}/usr/local/bin"
 mkdir -p "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}"
 mkdir -p "${DEB_BUILD_DIR}/usr/share/applications"
-mkdir -p "${DEB_BUILD_DIR}/usr/share/icons/hicolor/256x256/apps"
+mkdir -p "${DEB_BUILD_DIR}/usr/share/pixmaps"
+mkdir -p "${DEB_BUILD_DIR}/usr/share/doc/${PKG_NAME}"
 mkdir -p "${DIST_DIR}"
 
-echo -e "${GREEN}✓ Directories prepared${NC}"
+echo -e "${GREEN}  ✓ Directories prepared${NC}"
 echo ""
 
-# Step 3: Copy application files
-echo -e "${YELLOW}Step 3/6: Copying application files...${NC}"
+# Step 4: Copy application files
+echo -e "${YELLOW}[4/8] Copying application files...${NC}"
 
-# Copy main application files
-cp main.py "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/"
-cp requirements.txt "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/"
-cp -r core "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/"
-cp -r ui "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/"
-cp -r polkit "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/"
+# Copy main application files - 使用 -v 显示复制进度
+cp -v main.py "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/" || {
+    echo -e "${RED}✗ Failed to copy main.py${NC}"
+    exit 1
+}
 
-# Copy documentation
-if [ -f "README.md" ]; then
-    cp README.md "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/"
+cp -v requirements.txt "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/" || {
+    echo -e "${RED}✗ Failed to copy requirements.txt${NC}"
+    exit 1
+}
+
+# 复制可选的目录
+if [ -d "core" ]; then
+    cp -rv core "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/" || true
+    echo -e "${GREEN}  ✓ core directory copied${NC}"
 fi
 
-echo -e "${GREEN}✓ Application files copied${NC}"
+if [ -d "ui" ]; then
+    cp -rv ui "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/" || true
+    echo -e "${GREEN}  ✓ ui directory copied${NC}"
+fi
+
+if [ -d "polkit" ]; then
+    cp -rv polkit "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/" || true
+    echo -e "${GREEN}  ✓ polkit directory copied${NC}"
+fi
+
+# Copy documentation
+for doc in README.md INSTALL.md LICENSE LICENSE.md COPYING; do
+    if [ -f "$doc" ]; then
+        cp -v "$doc" "${DEB_BUILD_DIR}/usr/share/doc/${PKG_NAME}/" || true
+        echo -e "${GREEN}  ✓ $doc copied${NC}"
+    fi
+done
+
+echo -e "${GREEN}  ✓ Application files copied${NC}"
 echo ""
 
-# Step 4: Create launcher script
-echo -e "${YELLOW}Step 4/6: Creating launcher script...${NC}"
+# Step 5: Create launcher script
+echo -e "${YELLOW}[5/8] Creating launcher script...${NC}"
 
-cat > "${DEB_BUILD_DIR}/usr/local/bin/${PKG_NAME}" << 'EOF'
+cat > "${DEB_BUILD_DIR}/usr/local/bin/${PKG_NAME}" << 'LAUNCHER'
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+ov2n - OpenVPN + V2Ray/Xray Integrated Client
+A PyQt5-based GUI application for managing VPN connections
+"""
 
 import sys
 import os
 
-# Add application directory to path
-app_dir = "/usr/local/lib/pyqt-vpnv2ray-client"
-sys.path.insert(0, app_dir)
+# Set application directory
+APP_DIR = "/usr/local/lib/ov2n"
+sys.path.insert(0, APP_DIR)
+os.chdir(APP_DIR)
 
-# Change to application directory
-os.chdir(app_dir)
+# Set environment variables
+os.environ['QT_API'] = 'pyqt5'
 
-# Import and run main application
-from main import main
-
-if __name__ == "__main__":
-    main()
-EOF
+try:
+    from main import main
+    if __name__ == "__main__":
+        main()
+except ImportError as e:
+    print(f"Error: Failed to import main module: {e}", file=sys.stderr)
+    print("Please ensure ov2n is properly installed.", file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print(f"Error: {e}", file=sys.stderr)
+    sys.exit(1)
+LAUNCHER
 
 chmod +x "${DEB_BUILD_DIR}/usr/local/bin/${PKG_NAME}"
-
-echo -e "${GREEN}✓ Launcher script created${NC}"
+echo -e "${GREEN}  ✓ Launcher script created at /usr/local/bin/${PKG_NAME}${NC}"
 echo ""
 
-# Step 5: Create desktop entry
-echo -e "${YELLOW}Step 5/6: Creating desktop entry...${NC}"
+# Step 6: Create desktop entry
+echo -e "${YELLOW}[6/8] Creating desktop entry...${NC}"
 
-cat > "${DEB_BUILD_DIR}/usr/share/applications/${PKG_NAME}.desktop" << EOF
+cat > "${DEB_BUILD_DIR}/usr/share/applications/${PKG_NAME}.desktop" << DESKTOP
 [Desktop Entry]
 Type=Application
-Name=PyQt VPN V2Ray Client
-Comment=VPN Client with V2Ray/Xray Support
+Name=ov2n
+GenericName=VPN Client
+Comment=Integrated OpenVPN and V2Ray/Xray Client
 Exec=${PKG_NAME}
 Icon=${PKG_NAME}
-Categories=Network;Utility;
+Categories=Network;Utility;System;
 Terminal=false
 StartupNotify=true
-EOF
+Keywords=vpn;openvpn;v2ray;xray;proxy;network;security;
 
-echo -e "${GREEN}✓ Desktop entry created${NC}"
+[Desktop Action Help]
+Name=Help
+Exec=xdg-open https://github.com/alfiy/pyQt_vpnv2ray_client
+DESKTOP
+
+echo -e "${GREEN}  ✓ Desktop entry created${NC}"
 echo ""
 
-# Step 6: Create DEBIAN control file
-echo -e "${YELLOW}Step 6/6: Creating DEBIAN control file...${NC}"
+# Step 7: Create DEBIAN control file and scripts
+echo -e "${YELLOW}[7/8] Creating DEBIAN metadata...${NC}"
 
-cat > "${DEB_BUILD_DIR}/DEBIAN/control" << EOF
+cat > "${DEB_BUILD_DIR}/DEBIAN/control" << CONTROL
 Package: ${PKG_NAME}
 Version: ${VERSION}
 Architecture: all
 Maintainer: ${MAINTAINER}
-Depends: python3, python3-pyqt5, python3-pip, openvpn, policykit-1
-Recommends: xray | v2ray
-Suggests: network-manager
 Homepage: https://github.com/alfiy/pyQt_vpnv2ray_client
-Description: PyQt-based VPN Client with V2Ray/Xray Support
- A PyQt5 GUI application for managing OpenVPN and V2Ray/Xray connections.
- Features include:
+Depends: python3, python3-pyqt5, python3-pip, openvpn, policykit-1
+Recommends: xray | v2ray, network-manager
+Suggests: gnupg, curl
+Priority: optional
+Section: net
+Description: Integrated OpenVPN and V2Ray/Xray VPN Client
+ ov2n is a PyQt5-based GUI application that integrates OpenVPN
+ and V2Ray/Xray protocols, providing a unified interface for
+ managing both traditional VPN and modern proxy connections.
+ .
+ Features:
   - Simple and intuitive interface
   - Support for OpenVPN protocol
   - Support for V2Ray/Xray proxy protocol
   - Integrated connection management
   - PolicyKit integration for privilege escalation
-EOF
+  - Cross-platform compatibility
+CONTROL
 
-# Create postinst script for post-installation tasks
-cat > "${DEB_BUILD_DIR}/DEBIAN/postinst" << 'EOF'
+# Create postinst script - 修复路径和错误处理
+cat > "${DEB_BUILD_DIR}/DEBIAN/postinst" << 'POSTINST'
 #!/bin/bash
 set -e
 
-# Make launcher executable
-chmod +x /usr/local/bin/pyqt-vpnv2ray-client || true
+PKG_NAME="ov2n"
+PKG_PATH="/usr/local/lib/${PKG_NAME}"
+BIN_PATH="/usr/local/bin/${PKG_NAME}"
 
-# Create symlink for convenience
-ln -sf /usr/local/lib/pyqt-vpnv2ray-client /opt/pyqt-vpnv2ray-client || true
+echo "Setting up ${PKG_NAME}..."
+echo ""
 
-# Install polkit files
-if [ -d "/usr/local/lib/pyqt-vpnv2ray-client/polkit" ]; then
-    cp /usr/local/lib/pyqt-vpnv2ray-client/polkit/*.policy /usr/share/polkit-1/actions/ 2>/dev/null || true
-    cp /usr/local/lib/pyqt-vpnv2ray-client/polkit/*.py /usr/local/bin/ 2>/dev/null || true
-    chmod +x /usr/local/bin/vpn-helper.py 2>/dev/null || true
+# Step 1: Verify launcher exists
+if [ ! -f "${BIN_PATH}" ]; then
+    echo "ERROR: Launcher script not found at ${BIN_PATH}"
+    exit 1
+fi
+echo "✓ Launcher script verified"
+
+# Step 2: Make launcher executable
+chmod +x "${BIN_PATH}" 2>/dev/null || {
+    echo "ERROR: Failed to make launcher executable"
+    exit 1
+}
+echo "✓ Launcher script is executable"
+
+# Step 3: Verify package path exists
+if [ ! -d "${PKG_PATH}" ]; then
+    echo "ERROR: Package directory not found at ${PKG_PATH}"
+    exit 1
+fi
+echo "✓ Package directory verified"
+
+# Step 4: Create convenient symlink
+if [ ! -d "/opt" ]; then
+    mkdir -p /opt
+fi
+ln -sf ${PKG_PATH} /opt/${PKG_NAME} 2>/dev/null || true
+echo "✓ Symlink created at /opt/${PKG_NAME}"
+
+# Step 5: Install polkit files if present
+if [ -d "${PKG_PATH}/polkit" ]; then
+    echo "✓ Configuring PolicyKit integration..."
+    
+    if [ -f "${PKG_PATH}/polkit"/*.policy ]; then
+        cp ${PKG_PATH}/polkit/*.policy /usr/share/polkit-1/actions/ 2>/dev/null || true
+        echo "  ✓ PolicyKit policies installed"
+    fi
+    
+    # Copy helper scripts
+    for script in ${PKG_PATH}/polkit/*.py; do
+        if [ -f "$script" ]; then
+            cp "$script" /usr/local/bin/ 2>/dev/null || true
+            chmod +x /usr/local/bin/$(basename $script) 2>/dev/null || true
+        fi
+    done
+    echo "  ✓ Helper scripts installed"
 fi
 
-# Update desktop database
-update-desktop-database /usr/share/applications || true
+# Step 6: Update desktop database
+echo "✓ Updating desktop database..."
+update-desktop-database /usr/share/applications 2>/dev/null || true
 
-# Install Python dependencies
-pip3 install -q -r /usr/local/lib/pyqt-vpnv2ray-client/requirements.txt 2>/dev/null || python3 -m pip install -q -r /usr/local/lib/pyqt-vpnv2ray-client/requirements.txt || true
+# Step 7: Install Python dependencies
+echo "✓ Installing Python dependencies..."
+if [ -f "${PKG_PATH}/requirements.txt" ]; then
+    # 尝试多种方式安装
+    if pip3 install -q -r "${PKG_PATH}/requirements.txt" 2>/dev/null; then
+        echo "  ✓ Python dependencies installed via pip3"
+    elif python3 -m pip install -q -r "${PKG_PATH}/requirements.txt" 2>/dev/null; then
+        echo "  ✓ Python dependencies installed via python3 -m pip"
+    else
+        echo "  ⚠ Warning: Some dependencies may not have been installed"
+        echo "    Try manually: sudo pip3 install -r ${PKG_PATH}/requirements.txt"
+    fi
+else
+    echo "  ⚠ Warning: requirements.txt not found"
+fi
 
-echo "Installation completed successfully!"
-echo "Run 'pyqt-vpnv2ray-client' to start the application"
-EOF
+echo ""
+echo "╔════════════════════════════════════════╗"
+echo "║   ov2n Installation Completed!        ║"
+echo "╠════════════════════════════════════════╣"
+echo "║  Start the application:                ║"
+echo "║    $ ov2n                              ║"
+echo "║                                        ║"
+echo "║  Or search for 'ov2n' in your menu     ║"
+echo "╚════════════════════════════════════════╝"
+echo ""
+
+exit 0
+POSTINST
 
 chmod +x "${DEB_BUILD_DIR}/DEBIAN/postinst"
 
-# Create prerm script for pre-removal tasks
-cat > "${DEB_BUILD_DIR}/DEBIAN/prerm" << 'EOF'
+# Create prerm script
+cat > "${DEB_BUILD_DIR}/DEBIAN/prerm" << 'PRERM'
 #!/bin/bash
 set -e
+
+PKG_NAME="ov2n"
+
+echo "Cleaning up ${PKG_NAME}..."
 
 # Remove polkit files
 rm -f /usr/share/polkit-1/actions/org.example.vpnclient.policy 2>/dev/null || true
 rm -f /usr/local/bin/vpn-helper.py 2>/dev/null || true
 
-echo "Pre-removal tasks completed"
-EOF
+# Remove symlink
+rm -f /opt/${PKG_NAME} 2>/dev/null || true
+
+echo "✓ Pre-removal cleanup completed"
+exit 0
+PRERM
 
 chmod +x "${DEB_BUILD_DIR}/DEBIAN/prerm"
 
-echo -e "${GREEN}✓ DEBIAN control file created${NC}"
+# Create copyright file
+cat > "${DEB_BUILD_DIR}/DEBIAN/copyright" << COPYRIGHT
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: ov2n
+Upstream-Contact: Alfiy <your.email@example.com>
+Source: https://github.com/alfiy/pyQt_vpnv2ray_client
+
+Files: *
+Copyright: 2024 Alfiy
+License: MIT
+
+Files: debian/*
+Copyright: 2024 Alfiy
+License: MIT
+
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in all
+ copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ SOFTWARE.
+COPYRIGHT
+
+echo -e "${GREEN}  ✓ DEBIAN metadata created${NC}"
 echo ""
 
-# Step 7: Build the DEB package
-echo -e "${YELLOW}Building DEB package...${NC}"
+# Step 8: Build the DEB package
+echo -e "${YELLOW}[8/8] Building DEB package...${NC}"
 
-fakeroot dpkg-deb --build "${DEB_BUILD_DIR}" "${DIST_DIR}/${PKG_NAME}_${VERSION}_all.deb"
+DEB_FILE="${DIST_DIR}/${PKG_NAME}_${VERSION}_all.deb"
 
-if [ -f "${DIST_DIR}/${PKG_NAME}_${VERSION}_all.deb" ]; then
-    echo -e "${GREEN}✓ DEB package built successfully!${NC}"
+if fakeroot dpkg-deb --build "${DEB_BUILD_DIR}" "${DEB_FILE}" 2>/dev/null; then
+    echo -e "${GREEN}  ✓ DEB package built successfully!${NC}"
     echo ""
-    echo -e "${GREEN}Package details:${NC}"
-    dpkg -I "${DIST_DIR}/${PKG_NAME}_${VERSION}_all.deb"
+    
+    # Display package information
+    echo -e "${BLUE}Package Information:${NC}"
+    dpkg -I "${DEB_FILE}" 2>/dev/null | head -20
     echo ""
-    echo -e "${GREEN}Package location: ${DIST_DIR}/${PKG_NAME}_${VERSION}_all.deb${NC}"
+    
+    # Display file size
+    SIZE=$(du -h "${DEB_FILE}" | cut -f1)
+    echo -e "${BLUE}Package Size:${NC} ${SIZE}"
+    echo -e "${BLUE}Package Location:${NC} ${DEB_FILE}"
     echo ""
-    echo -e "${YELLOW}To install the package:${NC}"
-    echo "  sudo dpkg -i ${DIST_DIR}/${PKG_NAME}_${VERSION}_all.deb"
+    
+    # Installation instructions
+    echo -e "${BLUE}═══════════════════════════════════════${NC}"
+    echo -e "${GREEN}Installation Instructions:${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════${NC}"
     echo ""
-    echo -e "${YELLOW}To remove the package:${NC}"
-    echo "  sudo apt-get remove ${PKG_NAME}"
+    echo "  1. Install the package:"
+    echo -e "     ${YELLOW}sudo dpkg -i ${DEB_FILE}${NC}"
+    echo ""
+    echo "  2. If there are missing dependencies:"
+    echo -e "     ${YELLOW}sudo apt-get install -f${NC}"
+    echo ""
+    echo "  3. Launch the application:"
+    echo -e "     ${YELLOW}ov2n${NC}"
+    echo ""
+    echo "  4. Uninstall (if needed):"
+    echo -e "     ${YELLOW}sudo apt-get remove ${PKG_NAME}${NC}"
+    echo ""
+    echo -e "${BLUE}═══════════════════════════════════════${NC}"
+    echo ""
+    
 else
     echo -e "${RED}✗ Failed to build DEB package${NC}"
     exit 1
 fi
 
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}Build completed!${NC}"
-echo -e "${GREEN}========================================${NC}"
+echo -e "${BLUE}"
+echo "╔════════════════════════════════════════╗"
+echo "║         Build Completed!              ║"
+echo "║       ov2n v${VERSION} is ready        ║"
+echo "╚════════════════════════════════════════╝"
+echo -e "${NC}"
+
+exit 0

@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=PyQt VPN V2Ray Client
-Comment=VPN Client with V2Ray/Xray Support
-Exec=pyqt-vpnv2ray-client
-Icon=pyqt-vpnv2ray-client
-Categories=Network;Utility;
-Terminal=false
-StartupNotify=true

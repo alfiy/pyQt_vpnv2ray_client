@@ -1,24 +1,89 @@
 #!/bin/bash
 set -e
 
-# Make launcher executable
-chmod +x /usr/local/bin/pyqt-vpnv2ray-client || true
+PKG_NAME="ov2n"
+PKG_PATH="/usr/local/lib/${PKG_NAME}"
+BIN_PATH="/usr/local/bin/${PKG_NAME}"
 
-# Create symlink for convenience
-ln -sf /usr/local/lib/pyqt-vpnv2ray-client /opt/pyqt-vpnv2ray-client || true
+echo "Setting up ${PKG_NAME}..."
+echo ""
 
-# Install polkit files
-if [ -d "/usr/local/lib/pyqt-vpnv2ray-client/polkit" ]; then
-    cp /usr/local/lib/pyqt-vpnv2ray-client/polkit/*.policy /usr/share/polkit-1/actions/ 2>/dev/null || true
-    cp /usr/local/lib/pyqt-vpnv2ray-client/polkit/*.py /usr/local/bin/ 2>/dev/null || true
-    chmod +x /usr/local/bin/vpn-helper.py 2>/dev/null || true
+# Step 1: Verify launcher exists
+if [ ! -f "${BIN_PATH}" ]; then
+    echo "ERROR: Launcher script not found at ${BIN_PATH}"
+    exit 1
+fi
+echo "✓ Launcher script verified"
+
+# Step 2: Make launcher executable
+chmod +x "${BIN_PATH}" 2>/dev/null || {
+    echo "ERROR: Failed to make launcher executable"
+    exit 1
+}
+echo "✓ Launcher script is executable"
+
+# Step 3: Verify package path exists
+if [ ! -d "${PKG_PATH}" ]; then
+    echo "ERROR: Package directory not found at ${PKG_PATH}"
+    exit 1
+fi
+echo "✓ Package directory verified"
+
+# Step 4: Create convenient symlink
+if [ ! -d "/opt" ]; then
+    mkdir -p /opt
+fi
+ln -sf ${PKG_PATH} /opt/${PKG_NAME} 2>/dev/null || true
+echo "✓ Symlink created at /opt/${PKG_NAME}"
+
+# Step 5: Install polkit files if present
+if [ -d "${PKG_PATH}/polkit" ]; then
+    echo "✓ Configuring PolicyKit integration..."
+    
+    if [ -f "${PKG_PATH}/polkit"/*.policy ]; then
+        cp ${PKG_PATH}/polkit/*.policy /usr/share/polkit-1/actions/ 2>/dev/null || true
+        echo "  ✓ PolicyKit policies installed"
+    fi
+    
+    # Copy helper scripts
+    for script in ${PKG_PATH}/polkit/*.py; do
+        if [ -f "$script" ]; then
+            cp "$script" /usr/local/bin/ 2>/dev/null || true
+            chmod +x /usr/local/bin/$(basename $script) 2>/dev/null || true
+        fi
+    done
+    echo "  ✓ Helper scripts installed"
 fi
 
-# Update desktop database
-update-desktop-database /usr/share/applications || true
+# Step 6: Update desktop database
+echo "✓ Updating desktop database..."
+update-desktop-database /usr/share/applications 2>/dev/null || true
 
-# Install Python dependencies
-pip3 install -q -r /usr/local/lib/pyqt-vpnv2ray-client/requirements.txt 2>/dev/null || python3 -m pip install -q -r /usr/local/lib/pyqt-vpnv2ray-client/requirements.txt || true
+# Step 7: Install Python dependencies
+echo "✓ Installing Python dependencies..."
+if [ -f "${PKG_PATH}/requirements.txt" ]; then
+    # 尝试多种方式安装
+    if pip3 install -q -r "${PKG_PATH}/requirements.txt" 2>/dev/null; then
+        echo "  ✓ Python dependencies installed via pip3"
+    elif python3 -m pip install -q -r "${PKG_PATH}/requirements.txt" 2>/dev/null; then
+        echo "  ✓ Python dependencies installed via python3 -m pip"
+    else
+        echo "  ⚠ Warning: Some dependencies may not have been installed"
+        echo "    Try manually: sudo pip3 install -r ${PKG_PATH}/requirements.txt"
+    fi
+else
+    echo "  ⚠ Warning: requirements.txt not found"
+fi
 
-echo "Installation completed successfully!"
-echo "Run 'pyqt-vpnv2ray-client' to start the application"
+echo ""
+echo "╔════════════════════════════════════════╗"
+echo "║   ov2n Installation Completed!        ║"
+echo "╠════════════════════════════════════════╣"
+echo "║  Start the application:                ║"
+echo "║    $ ov2n                              ║"
+echo "║                                        ║"
+echo "║  Or search for 'ov2n' in your menu     ║"
+echo "╚════════════════════════════════════════╝"
+echo ""
+
+exit 0
