@@ -13,9 +13,9 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Default values
-VERSION="${1:-1.0.0}"
+VERSION="${1:-1.0.1}"
 DISTRO="${2:-focal}"
-PKG_NAME="ov2n"  # 小写，debian 包名必须小写
+PKG_NAME="ov2n"
 APP_NAME="ov2n"
 APP_TITLE="ov2n - VPN Client"
 MAINTAINER="Alfiy <your.email@example.com>"
@@ -25,8 +25,8 @@ DIST_DIR="dist"
 
 echo -e "${BLUE}"
 echo "╔════════════════════════════════════════╗"
-echo "║       ov2n - VPN Client Builder       ║"
-echo "║  OpenVPN + V2Ray/Xray Integration    ║"
+echo "║       ov2n - VPN Client Builder        ║"
+echo "║  OpenVPN + V2Ray/Xray Integration      ║"
 echo "╚════════════════════════════════════════╝"
 echo -e "${NC}"
 echo ""
@@ -84,7 +84,6 @@ echo ""
 # Step 4: Copy application files
 echo -e "${YELLOW}[4/8] Copying application files...${NC}"
 
-# Copy main application files - 使用 -v 显示复制进度
 cp -v main.py "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/" || {
     echo -e "${RED}✗ Failed to copy main.py${NC}"
     exit 1
@@ -194,7 +193,7 @@ Version: ${VERSION}
 Architecture: all
 Maintainer: ${MAINTAINER}
 Homepage: https://github.com/alfiy/pyQt_vpnv2ray_client
-Depends: python3, python3-pyqt5, python3-pip, openvpn, policykit-1
+Depends: python3 (>= 3.8), python3-pyqt5, openvpn, policykit-1
 Recommends: xray | v2ray, network-manager
 Suggests: gnupg, curl
 Priority: optional
@@ -213,7 +212,7 @@ Description: Integrated OpenVPN and V2Ray/Xray VPN Client
   - Cross-platform compatibility
 CONTROL
 
-# Create postinst script - 修复路径和错误处理
+# Create postinst script - 修复后的版本，不再安装 pip 版本的 PyQt5
 cat > "${DEB_BUILD_DIR}/DEBIAN/postinst" << 'POSTINST'
 #!/bin/bash
 set -e
@@ -276,25 +275,18 @@ fi
 echo "✓ Updating desktop database..."
 update-desktop-database /usr/share/applications 2>/dev/null || true
 
-# Step 7: Install Python dependencies
-echo "✓ Installing Python dependencies..."
-if [ -f "${PKG_PATH}/requirements.txt" ]; then
-    # 尝试多种方式安装
-    if pip3 install -q -r "${PKG_PATH}/requirements.txt" 2>/dev/null; then
-        echo "  ✓ Python dependencies installed via pip3"
-    elif python3 -m pip install -q -r "${PKG_PATH}/requirements.txt" 2>/dev/null; then
-        echo "  ✓ Python dependencies installed via python3 -m pip"
-    else
-        echo "  ⚠ Warning: Some dependencies may not have been installed"
-        echo "    Try manually: sudo pip3 install -r ${PKG_PATH}/requirements.txt"
-    fi
+# Step 7: 验证 PyQt5 安装 (不再通过 pip 安装)
+echo "✓ Verifying PyQt5 installation..."
+if python3 -c "import PyQt5.QtWidgets" 2>/dev/null; then
+    echo "  ✓ PyQt5 is properly installed"
 else
-    echo "  ⚠ Warning: requirements.txt not found"
+    echo "  ⚠ Warning: PyQt5 not found!"
+    echo "    Please install: sudo apt install python3-pyqt5"
 fi
 
 echo ""
 echo "╔════════════════════════════════════════╗"
-echo "║   ov2n Installation Completed!        ║"
+echo "║   ov2n Installation Completed!         ║"
 echo "╠════════════════════════════════════════╣"
 echo "║  Start the application:                ║"
 echo "║    $ ov2n                              ║"
@@ -415,7 +407,7 @@ fi
 
 echo -e "${BLUE}"
 echo "╔════════════════════════════════════════╗"
-echo "║         Build Completed!              ║"
+echo "║         Build Completed!               ║"
 echo "║       ov2n v${VERSION} is ready        ║"
 echo "╚════════════════════════════════════════╝"
 echo -e "${NC}"

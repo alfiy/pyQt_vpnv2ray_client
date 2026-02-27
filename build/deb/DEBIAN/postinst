@@ -59,25 +59,18 @@ fi
 echo "✓ Updating desktop database..."
 update-desktop-database /usr/share/applications 2>/dev/null || true
 
-# Step 7: Install Python dependencies
-echo "✓ Installing Python dependencies..."
-if [ -f "${PKG_PATH}/requirements.txt" ]; then
-    # 尝试多种方式安装
-    if pip3 install -q -r "${PKG_PATH}/requirements.txt" 2>/dev/null; then
-        echo "  ✓ Python dependencies installed via pip3"
-    elif python3 -m pip install -q -r "${PKG_PATH}/requirements.txt" 2>/dev/null; then
-        echo "  ✓ Python dependencies installed via python3 -m pip"
-    else
-        echo "  ⚠ Warning: Some dependencies may not have been installed"
-        echo "    Try manually: sudo pip3 install -r ${PKG_PATH}/requirements.txt"
-    fi
+# Step 7: 验证 PyQt5 安装 (不再通过 pip 安装)
+echo "✓ Verifying PyQt5 installation..."
+if python3 -c "import PyQt5.QtWidgets" 2>/dev/null; then
+    echo "  ✓ PyQt5 is properly installed"
 else
-    echo "  ⚠ Warning: requirements.txt not found"
+    echo "  ⚠ Warning: PyQt5 not found!"
+    echo "    Please install: sudo apt install python3-pyqt5"
 fi
 
 echo ""
 echo "╔════════════════════════════════════════╗"
-echo "║   ov2n Installation Completed!        ║"
+echo "║   ov2n Installation Completed!         ║"
 echo "╠════════════════════════════════════════╣"
 echo "║  Start the application:                ║"
 echo "║    $ ov2n                              ║"

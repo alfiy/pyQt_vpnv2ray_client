@@ -1,4 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Virtualenv
 .venv/
+venv/
+env/
+
+# Logs
 logs/
-core/__pycache__/
-ui/__pycache__/
+*.log
+
+# Build artifacts
+dist/
+*.deb
+*.tar.gz
+*.egg-info/
+
+# PyInstaller
+*.spec
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# System
+.DS_Store
+Thumbs.db
