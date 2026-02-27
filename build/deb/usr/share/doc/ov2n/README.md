@@ -93,7 +93,25 @@ python3 main.py
 └── README.md
 
 ```
+## 构建方法
 
+```
+# 构建默认版本(1.0.0)
+./build.sh
+# 构建指定版本  
+./build.sh --version 1.0.1  
+
+# 清理
+./build.sh clean
+
+# 重建
+./build.sh rebuild --version 1.0.1
+
+# 调试模式
+./build.sh --debug
+./build.sh rebuild --debug
+
+```
 ## 工作原理
 
 1. **权限提升流程**:

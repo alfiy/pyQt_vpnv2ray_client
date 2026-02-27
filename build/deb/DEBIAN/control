@@ -1,7 +1,7 @@
 Package: ov2n
-Version: 1.0.1
+Version: 1.1.0
 Architecture: all
-Maintainer: Alfiy <your.email@example.com>
+Maintainer: Alfiy <13012648@qq.com>
 Homepage: https://github.com/alfiy/pyQt_vpnv2ray_client
 Depends: python3 (>= 3.8), python3-pyqt5, openvpn, policykit-1
 Recommends: xray | v2ray, network-manager

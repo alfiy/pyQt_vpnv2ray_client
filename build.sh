@@ -3,7 +3,7 @@
 # Project: ov2n - OpenVPN + V2Ray Client
 # Usage: ./build.sh [version] [distro]
 
-set -e
+set -euo pipefail
 
 # Color definitions for output
 RED='\033[0;31m'
@@ -12,16 +12,88 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+########################################
+# Command & Argument Parsing
+########################################
+
+COMMAND="build"
+DEBUG=false
+
+if [[ "${1:-}" == "clean" ]]; then
+    COMMAND="clean"
+    shift
+elif [[ "${1:-}" == "rebuild" ]]; then
+    COMMAND="rebuild"
+    shift
+fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --debug)
+            DEBUG=true
+            set -x
+            shift
+            ;;
+        --version)
+            VERSION="$2"
+            shift 2
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
 # Default values
-VERSION="${1:-1.0.1}"
+VERSION="${VERSION:-}"
 DISTRO="${2:-focal}"
 PKG_NAME="ov2n"
 APP_NAME="ov2n"
 APP_TITLE="ov2n - VPN Client"
-MAINTAINER="Alfiy <your.email@example.com>"
+MAINTAINER="Alfiy <13012648@qq.com>"
 BUILD_DIR="build"
 DEB_BUILD_DIR="${BUILD_DIR}/deb"
 DIST_DIR="dist"
+
+########################################
+# Auto version from git tag (NEW)
+########################################
+if [ -z "$VERSION" ]; then
+    if git describe --tags --abbrev=0 >/dev/null 2>&1; then
+        VERSION=$(git describe --tags --abbrev=0)
+    else
+        VERSION="1.0.1"
+    fi
+fi
+
+########################################
+# Clean function (NEW)
+########################################
+clean_build() {
+    echo -e "${YELLOW}Cleaning build artifacts...${NC}"
+
+    rm -rf "${BUILD_DIR}" 2>/dev/null || true
+    rm -rf "${DIST_DIR}" 2>/dev/null || true
+
+    find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+    find . -type f -name "*.pyc" -delete 2>/dev/null || true
+
+    echo -e "${GREEN}✓ Clean completed successfully${NC}"
+    echo ""
+}
+
+########################################
+# Command router (NEW)
+########################################
+
+if [ "$COMMAND" = "clean" ]; then
+    clean_build
+    exit 0
+fi
+
+if [ "$COMMAND" = "rebuild" ]; then
+    clean_build
+fi
 
 echo -e "${BLUE}"
 echo "╔════════════════════════════════════════╗"
@@ -33,6 +105,8 @@ echo ""
 echo -e "${BLUE}Version:${NC} $VERSION"
 echo -e "${BLUE}Distribution:${NC} $DISTRO"
 echo ""
+
+
 
 # Step 1: Check dependencies
 echo -e "${YELLOW}[1/8] Checking dependencies...${NC}"
@@ -408,7 +482,7 @@ fi
 echo -e "${BLUE}"
 echo "╔════════════════════════════════════════╗"
 echo "║         Build Completed!               ║"
-echo "║       ov2n v${VERSION} is ready        ║"
+echo "║       ov2n v${VERSION} is ready             ║"
 echo "╚════════════════════════════════════════╝"
 echo -e "${NC}"
 
