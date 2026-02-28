@@ -70,7 +70,7 @@ def save_tproxy_config(enabled, vps_ip, port, mark, table):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("OpenVPN + V2Ray Client (Polkit)")
+        self.setWindowTitle("Ov2n Client")
         self.setGeometry(200, 200, 720, 600)
 
         # 状态标签
