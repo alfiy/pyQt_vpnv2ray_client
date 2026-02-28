@@ -108,8 +108,7 @@ python3 main.py
 ./build.sh rebuild --version 1.0.1
 
 # 调试模式
-./build.sh --debug
-./build.sh rebuild --debug
+./build.sh debug
 
 ```
 ## 工作原理

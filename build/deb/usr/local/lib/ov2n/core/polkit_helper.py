@@ -147,3 +147,110 @@ class PolkitHelper:
                 
         except Exception as e:
             return False, f"停止失败: {str(e)}"
+
+    @staticmethod
+    def start_tproxy(v2ray_port, vps_ip, mark=1, table=100):
+        """
+        使用 polkit 启动 tproxy 透明代理规则
+        
+        Args:
+            v2ray_port: V2Ray TPROXY 监听端口
+            vps_ip: VPS 服务器 IP
+            mark: fwmark 值 (默认 1)
+            table: 路由表编号 (默认 100)
+            
+        Returns:
+            tuple: (success: bool, message: str)
+        """
+        if not PolkitHelper.check_polkit_available():
+            return False, "系统未安装 pkexec (polkit)"
+        
+        if not PolkitHelper.check_helper_installed():
+            return False, f"Helper 脚本未安装: {PolkitHelper.HELPER_SCRIPT}"
+        
+        try:
+            cmd = [
+                "pkexec",
+                PolkitHelper.HELPER_SCRIPT,
+                "tproxy-start",
+                "--port", str(v2ray_port),
+                "--vps-ip", str(vps_ip),
+                "--mark", str(mark),
+                "--table", str(table),
+            ]
+            
+            print(f"执行 tproxy-start 命令: {' '.join(cmd)}")
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                print(f"tproxy stdout: {result.stdout}")
+                return True, "透明代理规则已配置"
+            else:
+                error_msg = result.stderr.strip() if result.stderr else "未知错误"
+                if "dismissed" in error_msg.lower() or "cancelled" in error_msg.lower():
+                    return False, "用户取消了权限授权"
+                return False, f"配置透明代理失败:\n{error_msg}"
+                
+        except subprocess.TimeoutExpired:
+            return False, "操作超时"
+        except Exception as e:
+            return False, f"配置透明代理失败: {str(e)}"
+
+    @staticmethod
+    def stop_tproxy(v2ray_port=12345, vps_ip="0.0.0.0", mark=1, table=100):
+        """
+        使用 polkit 清理 tproxy 透明代理规则
+        
+        Args:
+            v2ray_port: V2Ray TPROXY 监听端口
+            vps_ip: VPS 服务器 IP
+            mark: fwmark 值
+            table: 路由表编号
+            
+        Returns:
+            tuple: (success: bool, message: str)
+        """
+        if not PolkitHelper.check_polkit_available():
+            return False, "系统未安装 pkexec (polkit)"
+        
+        if not PolkitHelper.check_helper_installed():
+            return False, f"Helper 脚本未安装: {PolkitHelper.HELPER_SCRIPT}"
+        
+        try:
+            cmd = [
+                "pkexec",
+                PolkitHelper.HELPER_SCRIPT,
+                "tproxy-stop",
+                "--port", str(v2ray_port),
+                "--vps-ip", str(vps_ip),
+                "--mark", str(mark),
+                "--table", str(table),
+            ]
+            
+            print(f"执行 tproxy-stop 命令: {' '.join(cmd)}")
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                return True, "透明代理规则已清理"
+            else:
+                error_msg = result.stderr.strip() if result.stderr else "未知错误"
+                if "dismissed" in error_msg.lower() or "cancelled" in error_msg.lower():
+                    return False, "用户取消了权限授权"
+                return False, f"清理透明代理失败:\n{error_msg}"
+                
+        except subprocess.TimeoutExpired:
+            return False, "操作超时"
+        except Exception as e:
+            return False, f"清理透明代理失败: {str(e)}"

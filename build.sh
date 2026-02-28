@@ -267,9 +267,9 @@ Version: ${VERSION}
 Architecture: all
 Maintainer: ${MAINTAINER}
 Homepage: https://github.com/alfiy/pyQt_vpnv2ray_client
-Depends: python3 (>= 3.8), python3-pyqt5, openvpn, policykit-1
+Depends: python3 (>= 3.8), python3-pyqt5, openvpn, policykit-1, iptables
 Recommends: xray | v2ray, network-manager
-Suggests: gnupg, curl
+Suggests: gnupg, curl, iptables-persistent
 Priority: optional
 Section: net
 Description: Integrated OpenVPN and V2Ray/Xray VPN Client
@@ -281,6 +281,7 @@ Description: Integrated OpenVPN and V2Ray/Xray VPN Client
   - Simple and intuitive interface
   - Support for OpenVPN protocol
   - Support for V2Ray/Xray proxy protocol
+  - Transparent proxy via iptables TProxy
   - Integrated connection management
   - PolicyKit integration for privilege escalation
   - Cross-platform compatibility
@@ -459,10 +460,11 @@ if fakeroot dpkg-deb --build "${DEB_BUILD_DIR}" "${DEB_FILE}" 2>/dev/null; then
     echo -e "${GREEN}Installation Instructions:${NC}"
     echo -e "${BLUE}═══════════════════════════════════════${NC}"
     echo ""
-    echo "  1. Install the package:"
-    echo -e "     ${YELLOW}sudo dpkg -i ${DEB_FILE}${NC}"
+    echo "  1. Install the package (recommended, auto-resolves dependencies):"
+    echo -e "     ${YELLOW}sudo apt install ./${DEB_FILE}${NC}"
     echo ""
-    echo "  2. If there are missing dependencies:"
+    echo "  2. Or use dpkg + fix dependencies:"
+    echo -e "     ${YELLOW}sudo dpkg -i ${DEB_FILE}${NC}"
     echo -e "     ${YELLOW}sudo apt-get install -f${NC}"
     echo ""
     echo "  3. Launch the application:"
