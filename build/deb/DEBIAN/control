@@ -1,11 +1,11 @@
 Package: ov2n
-Version: 1.2.6
+Version: 1.3.0
 Architecture: all
 Maintainer: Alfiy <13012648@qq.com>
 Homepage: https://github.com/alfiy/pyQt_vpnv2ray_client
-Depends: python3 (>= 3.8), python3-pyqt5, openvpn, policykit-1, iptables
+Depends: python3 (>= 3.8), python3-pyqt5, openvpn, policykit-1, iptables, wget | curl
 Recommends: xray | v2ray, network-manager
-Suggests: gnupg, curl, iptables-persistent
+Suggests: gnupg, iptables-persistent
 Priority: optional
 Section: net
 Description: Integrated OpenVPN and V2Ray/Xray VPN Client
@@ -20,4 +20,6 @@ Description: Integrated OpenVPN and V2Ray/Xray VPN Client
   - Transparent proxy via iptables TProxy
   - Integrated connection management
   - PolicyKit integration for privilege escalation
+  - Bundled geo data files (no download needed on first install)
+  - Auto-check geo file updates at runtime
   - Cross-platform compatibility

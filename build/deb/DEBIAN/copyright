@@ -1,13 +1,9 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: ov2n
-Upstream-Contact: Alfiy <your.email@example.com>
+Upstream-Contact: Alfiy <13012648@qq.com>
 Source: https://github.com/alfiy/pyQt_vpnv2ray_client
 
 Files: *
-Copyright: 2024 Alfiy
-License: MIT
-
-Files: debian/*
 Copyright: 2024 Alfiy
 License: MIT
 
