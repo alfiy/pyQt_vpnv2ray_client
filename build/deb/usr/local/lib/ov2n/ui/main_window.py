@@ -1,8 +1,13 @@
 """
 主窗口界面
 集成 Polkit 权限提升功能 + TProxy 透明代理配置
+
+增强: VPS IP 和 TProxy 端口自动从 V2Ray config.json 中获取,
+      fwmark 和路由表在检测系统已有值的基础上自动分配
 """
+import json
 import os
+import subprocess
 from PyQt5.QtGui import QIcon
 import re
 from PyQt5.QtWidgets import (
@@ -68,11 +73,223 @@ def save_tproxy_config(enabled, vps_ip, port, mark, table):
         print(f"保存 tproxy 配置失败: {e}")
 
 
+# ==================== 自动检测辅助函数 ====================
+
+def parse_v2ray_config(config_path):
+    """
+    解析 V2Ray config.json，提取 VPS IP 和 TProxy 端口
+
+    Returns:
+        dict: {"vps_ip": str or None, "tproxy_port": int or None}
+    """
+    result = {"vps_ip": None, "tproxy_port": None}
+
+    if not config_path or not os.path.exists(config_path):
+        return result
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        if not content:
+            # 文件为空，静默跳过
+            return result
+        config = json.loads(content)
+    except (json.JSONDecodeError, IOError, OSError) as e:
+        print(f"解析 V2Ray 配置文件失败: {e}")
+        return result
+
+    # 1. 提取 VPS IP: 从第一个非 direct/freedom outbound 的 servers[0].address 或 vnext[0].address 获取
+    outbounds = config.get("outbounds", [])
+    for ob in outbounds:
+        tag = ob.get("tag", "")
+        protocol = ob.get("protocol", "")
+        # 跳过 direct 和 freedom 类型的 outbound
+        if tag == "direct" or protocol == "freedom":
+            continue
+        settings = ob.get("settings", {})
+        # shadowsocks / trojan 等使用 servers
+        servers = settings.get("servers", [])
+        if servers and isinstance(servers, list):
+            addr = servers[0].get("address", "")
+            if addr:
+                result["vps_ip"] = addr
+                break
+        # vmess / vless 等使用 vnext
+        vnext = settings.get("vnext", [])
+        if vnext and isinstance(vnext, list):
+            addr = vnext[0].get("address", "")
+            if addr:
+                result["vps_ip"] = addr
+                break
+
+    # 2. 提取 TProxy 端口: 从 dokodemo-door inbound (tag 含 tproxy 或 sockopt.tproxy 存在) 获取
+    inbounds = config.get("inbounds", [])
+    for ib in inbounds:
+        tag = ib.get("tag", "")
+        protocol = ib.get("protocol", "")
+        stream = ib.get("streamSettings", {})
+        sockopt = stream.get("sockopt", {})
+        tproxy_mode = sockopt.get("tproxy", "")
+
+        # 匹配条件: dokodemo-door 协议 + (tag 含 tproxy 或 sockopt.tproxy 存在)
+        if protocol == "dokodemo-door" and (
+            "tproxy" in tag.lower() or tproxy_mode
+        ):
+            port = ib.get("port")
+            if port and isinstance(port, int):
+                result["tproxy_port"] = port
+                break
+
+    return result
+
+
+def detect_system_fwmarks():
+    """
+    检测系统中已使用的 fwmark 值
+
+    通过 `ip rule list` 和 `iptables -t mangle -L` 检测
+
+    Returns:
+        set: 已使用的 fwmark 值集合
+    """
+    used_marks = set()
+
+    # 方法 1: 从 ip rule 中检测
+    try:
+        result = subprocess.run(
+            ["ip", "rule", "list"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                # 格式: "32765: from all fwmark 0x1 lookup 100"
+                match = re.search(r'fwmark\s+(0x[0-9a-fA-F]+|\d+)', line)
+                if match:
+                    val = match.group(1)
+                    if val.startswith("0x"):
+                        used_marks.add(int(val, 16))
+                    else:
+                        used_marks.add(int(val))
+    except Exception as e:
+        print(f"检测 ip rule fwmark 失败: {e}")
+
+    # 方法 2: 从 iptables mangle 表中检测
+    try:
+        result = subprocess.run(
+            ["iptables", "-t", "mangle", "-L", "-n", "--line-numbers"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                match = re.search(r'(?:MARK set|mark match)\s+(0x[0-9a-fA-F]+|\d+)', line)
+                if match:
+                    val = match.group(1)
+                    if val.startswith("0x"):
+                        used_marks.add(int(val, 16))
+                    else:
+                        used_marks.add(int(val))
+    except Exception as e:
+        print(f"检测 iptables fwmark 失败: {e}")
+
+    return used_marks
+
+
+def detect_system_route_tables():
+    """
+    检测系统中已使用的策略路由表编号
+
+    通过 `ip rule list` 和 /etc/iproute2/rt_tables 检测
+
+    Returns:
+        set: 已使用的路由表编号集合
+    """
+    used_tables = set()
+
+    # 从 ip rule 中检测
+    try:
+        result = subprocess.run(
+            ["ip", "rule", "list"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                match = re.search(r'lookup\s+(\d+)', line)
+                if match:
+                    table_num = int(match.group(1))
+                    # 排除系统默认表 (main=254, default=253, local=255)
+                    if table_num < 253:
+                        used_tables.add(table_num)
+    except Exception as e:
+        print(f"检测路由表失败: {e}")
+
+    # 也检查 /etc/iproute2/rt_tables 中的自定义表
+    try:
+        rt_tables_path = "/etc/iproute2/rt_tables"
+        if os.path.exists(rt_tables_path):
+            with open(rt_tables_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            table_num = int(parts[0])
+                            if 1 <= table_num < 253:
+                                used_tables.add(table_num)
+                        except ValueError:
+                            pass
+    except Exception as e:
+        print(f"读取 rt_tables 失败: {e}")
+
+    return used_tables
+
+
+def find_available_mark(start=1, max_val=255):
+    """
+    找到一个未被系统使用的 fwmark 值
+
+    Args:
+        start: 起始值 (默认 1)
+        max_val: 最大值 (默认 255)
+
+    Returns:
+        int: 可用的 fwmark 值
+    """
+    used = detect_system_fwmarks()
+    candidate = start
+    while candidate <= max_val:
+        if candidate not in used:
+            return candidate
+        candidate += 1
+    return start
+
+
+def find_available_table(start=100, max_val=252):
+    """
+    找到一个未被系统使用的路由表编号
+
+    Args:
+        start: 起始值 (默认 100)
+        max_val: 最大值 (默认 252)
+
+    Returns:
+        int: 可用的路由表编号
+    """
+    used = detect_system_route_tables()
+    candidate = start
+    while candidate <= max_val:
+        if candidate not in used:
+            return candidate
+        candidate += 1
+    return start
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Ov2n Client")
-        self.setGeometry(200, 200, 720, 600)
+        self.setGeometry(200, 200, 360, 650)
 
         # 设置窗口图标
         icon_path = os.path.join(
@@ -172,32 +389,76 @@ class MainWindow(QMainWindow):
         self.tproxy_checkbox.setToolTip("启用后,启动 VPN + V2Ray 时将自动配置 iptables tproxy 规则")
         tproxy_layout.addRow(self.tproxy_checkbox)
 
-        # VPS IP
+        # VPS IP (带自动检测提示)
+        vps_ip_layout = QHBoxLayout()
         self.vps_ip_input = QLineEdit(tproxy_conf["vps_ip"])
-        self.vps_ip_input.setPlaceholderText("例如: 1.2.3.4")
-        self.vps_ip_input.setToolTip("VPS 服务器 IP,此 IP 的流量将被排除,防止代理循环")
-        tproxy_layout.addRow("VPS IP:", self.vps_ip_input)
+        self.vps_ip_input.setPlaceholderText("自动从 V2Ray 配置获取")
+        self.vps_ip_input.setToolTip(
+            "VPS 服务器 IP，此 IP 的流量将被排除，防止代理循环\n"
+            "选择 V2Ray 配置文件后将自动填充"
+        )
+        self.vps_ip_auto_label = QLabel("")
+        self.vps_ip_auto_label.setStyleSheet("color: #4CAF50; font-size: 11px;")
+        vps_ip_layout.addWidget(self.vps_ip_input)
+        vps_ip_layout.addWidget(self.vps_ip_auto_label)
+        tproxy_layout.addRow("VPS IP:", vps_ip_layout)
 
-        # TProxy 端口
+        # TProxy 端口 (带自动检测提示)
+        tproxy_port_layout = QHBoxLayout()
         self.tproxy_port_input = QSpinBox()
         self.tproxy_port_input.setRange(1, 65535)
         self.tproxy_port_input.setValue(tproxy_conf["port"])
-        self.tproxy_port_input.setToolTip("V2Ray/Xray 的 tproxy 入站监听端口 (需与 V2Ray 配置一致)")
-        tproxy_layout.addRow("TProxy 端口:", self.tproxy_port_input)
+        self.tproxy_port_input.setToolTip(
+            "V2Ray/Xray 的 tproxy 入站监听端口\n"
+            "选择 V2Ray 配置文件后将自动填充"
+        )
+        self.tproxy_port_auto_label = QLabel("")
+        self.tproxy_port_auto_label.setStyleSheet("color: #4CAF50; font-size: 11px;")
+        tproxy_port_layout.addWidget(self.tproxy_port_input)
+        tproxy_port_layout.addWidget(self.tproxy_port_auto_label)
+        tproxy_layout.addRow("TProxy 端口:", tproxy_port_layout)
 
-        # fwmark
+        # fwmark (带自动检测提示)
+        mark_layout = QHBoxLayout()
         self.mark_input = QSpinBox()
         self.mark_input.setRange(1, 255)
         self.mark_input.setValue(tproxy_conf["mark"])
-        self.mark_input.setToolTip("iptables fwmark 标记值 (默认 1)")
-        tproxy_layout.addRow("fwmark:", self.mark_input)
+        self.mark_input.setToolTip(
+            "iptables fwmark 标记值\n"
+            "点击「自动检测」按钮可自动分配不冲突的值"
+        )
+        self.mark_auto_label = QLabel("")
+        self.mark_auto_label.setStyleSheet("color: #2196F3; font-size: 11px;")
+        mark_layout.addWidget(self.mark_input)
+        mark_layout.addWidget(self.mark_auto_label)
+        tproxy_layout.addRow("fwmark:", mark_layout)
 
-        # 路由表
+        # 路由表 (带自动检测提示)
+        table_layout = QHBoxLayout()
         self.table_input = QSpinBox()
         self.table_input.setRange(1, 252)
         self.table_input.setValue(tproxy_conf["table"])
-        self.table_input.setToolTip("策略路由表编号 (默认 100)")
-        tproxy_layout.addRow("路由表:", self.table_input)
+        self.table_input.setToolTip(
+            "策略路由表编号\n"
+            "点击「自动检测」按钮可自动分配不冲突的值"
+        )
+        self.table_auto_label = QLabel("")
+        self.table_auto_label.setStyleSheet("color: #2196F3; font-size: 11px;")
+        table_layout.addWidget(self.table_input)
+        table_layout.addWidget(self.table_auto_label)
+        tproxy_layout.addRow("路由表:", table_layout)
+
+        # 自动检测按钮
+        self.auto_detect_button = QPushButton("🔍 自动检测 fwmark 和路由表")
+        self.auto_detect_button.setStyleSheet(
+            "padding: 5px; font-size: 12px; color: #2196F3;"
+        )
+        self.auto_detect_button.setToolTip(
+            "检测系统中已使用的 fwmark 和路由表值，\n"
+            "自动分配不冲突的值"
+        )
+        self.auto_detect_button.clicked.connect(self._auto_detect_mark_and_table)
+        tproxy_layout.addRow(self.auto_detect_button)
 
         self.tproxy_group.setLayout(tproxy_layout)
 
@@ -235,6 +496,8 @@ class MainWindow(QMainWindow):
             self.vpn_path_label.setText(f"OpenVPN 配置: {os.path.basename(self.vpn_config_path)}")
         if os.path.exists(self.v2ray_config_path):
             self.v2ray_path_label.setText(f"V2Ray 配置: {os.path.basename(self.v2ray_config_path)}")
+            # 自动解析默认 V2Ray 配置
+            self._auto_fill_from_v2ray_config(self.v2ray_config_path)
 
         # 绑定按钮事件
         self.start_button.clicked.connect(self.start_worker)
@@ -244,6 +507,53 @@ class MainWindow(QMainWindow):
 
         self.worker = None
 
+    # ------------------- 自动检测辅助 -------------------
+    def _auto_fill_from_v2ray_config(self, config_path):
+        """
+        从 V2Ray config.json 自动填充 VPS IP 和 TProxy 端口
+        """
+        parsed = parse_v2ray_config(config_path)
+
+        if parsed["vps_ip"]:
+            self.vps_ip_input.setText(parsed["vps_ip"])
+            self.vps_ip_auto_label.setText("✓ 自动获取")
+        else:
+            self.vps_ip_auto_label.setText("")
+
+        if parsed["tproxy_port"]:
+            self.tproxy_port_input.setValue(parsed["tproxy_port"])
+            self.tproxy_port_auto_label.setText("✓ 自动获取")
+        else:
+            self.tproxy_port_auto_label.setText("")
+
+    def _auto_detect_mark_and_table(self):
+        """自动检测并分配不冲突的 fwmark 和路由表值"""
+        # 检测 fwmark
+        used_marks = detect_system_fwmarks()
+        available_mark = find_available_mark(start=1)
+        self.mark_input.setValue(available_mark)
+
+        if used_marks:
+            marks_str = ", ".join(str(m) for m in sorted(used_marks))
+            self.mark_auto_label.setText(f"✓ 已用: {marks_str} → 分配: {available_mark}")
+        else:
+            self.mark_auto_label.setText(f"✓ 系统无占用 → 使用: {available_mark}")
+
+        # 检测路由表
+        used_tables = detect_system_route_tables()
+        available_table = find_available_table(start=100)
+        self.table_input.setValue(available_table)
+
+        if used_tables:
+            tables_str = ", ".join(str(t) for t in sorted(used_tables))
+            self.table_auto_label.setText(f"✓ 已用: {tables_str} → 分配: {available_table}")
+        else:
+            self.table_auto_label.setText(f"✓ 系统无占用 → 使用: {available_table}")
+
+        self.label.setText(
+            f"自动检测完成: fwmark={available_mark}, 路由表={available_table}"
+        )
+
     # ------------------- TProxy 辅助 -------------------
     def _toggle_tproxy_inputs(self, enabled):
         """根据复选框状态启用/禁用 tproxy 输入控件"""
@@ -251,6 +561,11 @@ class MainWindow(QMainWindow):
         self.tproxy_port_input.setEnabled(enabled)
         self.mark_input.setEnabled(enabled)
         self.table_input.setEnabled(enabled)
+        self.auto_detect_button.setEnabled(enabled)
+
+        # 启用时自动检测 fwmark 和路由表
+        if enabled:
+            self._auto_detect_mark_and_table()
 
     def _validate_ip(self, ip_str):
         """验证 IPv4 地址格式"""
@@ -289,10 +604,12 @@ class MainWindow(QMainWindow):
             self.v2ray_config_path = path
             self.v2ray_path_label.setText(f"V2Ray 配置: {os.path.basename(path)}")
             self.label.setText(f"已选择 V2Ray 配置: {os.path.basename(path)}")
+            # 自动从新选择的 V2Ray 配置中提取 VPS IP 和 TProxy 端口
+            self._auto_fill_from_v2ray_config(path)
 
     # ------------------- 启动/停止 Worker -------------------
     def start_worker(self):
-        """启动 VPN 连接(使用 Polkit 权限提升)"""
+        """启动 VPN 连接（使用 Polkit 权限提升）"""
         # 验证配置文件
         if not os.path.exists(self.vpn_config_path):
             QMessageBox.critical(
@@ -322,14 +639,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(
                     self,
                     "错误",
-                    "启用透明代理时必须填写 VPS IP 地址。"
+                    "启用透明代理时必须填写 VPS IP 地址。\n\n"
+                    "提示: 选择 V2Ray 配置文件后会自动填充。"
                 )
                 return
             if not self._validate_ip(tproxy_vps_ip):
                 QMessageBox.critical(
                     self,
                     "错误",
-                    f"VPS IP 地址格式不正确: {tproxy_vps_ip}\n\n请输入有效的 IPv4 地址,例如: 1.2.3.4"
+                    f"VPS IP 地址格式不正确: {tproxy_vps_ip}\n\n请输入有效的 IPv4 地址，例如: 1.2.3.4"
                 )
                 return
 
@@ -338,7 +656,7 @@ class MainWindow(QMainWindow):
 
         # 防止重复启动
         if self.worker and self.worker.isRunning():
-            QMessageBox.warning(self, "警告", "连接已在运行中,请勿重复启动。")
+            QMessageBox.warning(self, "警告", "连接已在运行中，请勿重复启动。")
             return
 
         # 显示提示信息
@@ -416,7 +734,7 @@ class MainWindow(QMainWindow):
             reply = QMessageBox.question(
                 self,
                 "确认退出",
-                "VPN 连接正在运行中,确定要退出吗?\n\n退出将自动断开连接并清理透明代理规则。",
+                "VPN 连接正在运行中，确定要退出吗？\n\n退出将自动断开连接并清理透明代理规则。",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No
             )
