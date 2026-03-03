@@ -3,6 +3,7 @@
 集成 Polkit 权限提升功能 + TProxy 透明代理配置
 """
 import os
+from PyQt5.QtGui import QIcon
 import re
 from PyQt5.QtWidgets import (
     QMainWindow, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QWidget,
@@ -72,6 +73,15 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Ov2n Client")
         self.setGeometry(200, 200, 720, 600)
+
+        # 设置窗口图标
+        icon_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "resources",
+            "images",
+            "ov2n256.png"
+        )
+        self.setWindowIcon(QIcon(icon_path))
 
         # 状态标签
         self.label = QLabel("状态: 就绪")

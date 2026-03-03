@@ -194,6 +194,10 @@ mkdir -p "${DEB_BUILD_DIR}/usr/share/applications"
 mkdir -p "${DEB_BUILD_DIR}/usr/share/pixmaps"
 mkdir -p "${DEB_BUILD_DIR}/usr/share/doc/${PKG_NAME}"
 mkdir -p "${DIST_DIR}"
+mkdir -p "${DEB_BUILD_DIR}/usr/share/icons/hicolor/48x48/apps"
+mkdir -p "${DEB_BUILD_DIR}/usr/share/icons/hicolor/64x64/apps"
+mkdir -p "${DEB_BUILD_DIR}/usr/share/icons/hicolor/128x128/apps"
+mkdir -p "${DEB_BUILD_DIR}/usr/share/icons/hicolor/256x256/apps"
 
 echo -e "${GREEN}  ✓ Directories prepared${NC}"
 echo ""
@@ -252,6 +256,25 @@ done
 
 echo -e "${GREEN}  ✓ Application files copied${NC}"
 echo ""
+
+# Copy application icons
+echo -e "${YELLOW}  Installing application icons...${NC}"
+
+cp resources/images/ov2n48.png  \
+   "${DEB_BUILD_DIR}/usr/share/icons/hicolor/48x48/apps/ov2n.png" 2>/dev/null || true
+
+cp resources/images/ov2n64.png  \
+   "${DEB_BUILD_DIR}/usr/share/icons/hicolor/64x64/apps/ov2n.png" 2>/dev/null || true
+
+cp resources/images/ov2n128.png \
+   "${DEB_BUILD_DIR}/usr/share/icons/hicolor/128x128/apps/ov2n.png" 2>/dev/null || true
+
+cp resources/images/ov2n256.png \
+   "${DEB_BUILD_DIR}/usr/share/icons/hicolor/256x256/apps/ov2n.png" 2>/dev/null || true
+
+chmod 644 "${DEB_BUILD_DIR}/usr/share/icons/hicolor/"*/apps/ov2n.png 2>/dev/null || true
+
+echo -e "${GREEN}  ✓ Icons installed${NC}"
 
 # Step 6: Create launcher script
 echo -e "${YELLOW}[6/9] Creating launcher script...${NC}"
@@ -576,6 +599,7 @@ log_info "Symlinks created"
 echo ""
 echo "Updating desktop database..."
 update-desktop-database /usr/share/applications 2>/dev/null || true
+gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
 log_info "Desktop database updated"
 
 # Step 9: 验证 PyQt5 安装

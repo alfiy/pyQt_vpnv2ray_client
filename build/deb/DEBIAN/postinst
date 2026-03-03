@@ -225,6 +225,7 @@ log_info "Symlinks created"
 echo ""
 echo "Updating desktop database..."
 update-desktop-database /usr/share/applications 2>/dev/null || true
+gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
 log_info "Desktop database updated"
 
 # Step 9: 验证 PyQt5 安装
