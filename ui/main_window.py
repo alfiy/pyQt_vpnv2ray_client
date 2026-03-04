@@ -18,7 +18,6 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 from core.worker import WorkerThread
 import shutil
-import tempfile
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -292,9 +291,9 @@ def find_available_table(start=100, max_val=252):
     return start
 
 
-def copy_file_with_sudo(src, dst):
+def copy_config_file(src, dst):
     """
-    使用 pkexec 以 root 权限复制文件
+    复制配置文件到用户目录
     
     Args:
         src: 源文件路径
@@ -304,7 +303,7 @@ def copy_file_with_sudo(src, dst):
         tuple: (success: bool, error_msg: str or None)
     """
     try:
-        # 先验证源文件存在且可读
+        # 验证源文件存在且可读
         if not os.path.exists(src):
             return False, f"源文件不存在: {src}"
         
@@ -318,71 +317,26 @@ def copy_file_with_sudo(src, dst):
         if len(content) == 0:
             return False, f"源文件为空: {src}"
         
-        # 创建临时文件
-        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.tmp') as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
-        
         # 确保目标目录存在
         dst_dir = os.path.dirname(dst)
+        os.makedirs(dst_dir, exist_ok=True)
         
-        # 使用 pkexec 创建目录
-        mkdir_cmd = ["pkexec", "mkdir", "-p", dst_dir]
-        mkdir_result = subprocess.run(
-            mkdir_cmd,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        
-        if mkdir_result.returncode != 0:
-            os.unlink(tmp_path)
-            return False, f"创建目录失败: {mkdir_result.stderr}"
-        
-        # 使用 pkexec 复制文件
-        cp_cmd = ["pkexec", "cp", "-f", tmp_path, dst]
-        cp_result = subprocess.run(
-            cp_cmd,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        
-        # 清理临时文件
-        os.unlink(tmp_path)
-        
-        if cp_result.returncode != 0:
-            return False, f"复制文件失败: {cp_result.stderr}"
+        # 直接复制文件
+        shutil.copyfile(src, dst)
         
         # 验证复制是否成功
-        verify_cmd = ["pkexec", "test", "-f", dst]
-        verify_result = subprocess.run(
-            verify_cmd,
-            capture_output=True,
-            timeout=10
-        )
-        
-        if verify_result.returncode != 0:
+        if not os.path.exists(dst):
             return False, f"文件复制后验证失败: {dst}"
         
-        # 获取文件大小验证
-        stat_cmd = ["pkexec", "stat", "-c", "%s", dst]
-        stat_result = subprocess.run(
-            stat_cmd,
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        
-        if stat_result.returncode == 0:
-            dst_size = int(stat_result.stdout.strip())
-            if dst_size != len(content):
-                return False, f"文件大小不匹配: 原始 {len(content)} 字节, 目标 {dst_size} 字节"
+        # 验证文件大小
+        dst_size = os.path.getsize(dst)
+        if dst_size != len(content):
+            return False, f"文件大小不匹配: 原始 {len(content)} 字节, 目标 {dst_size} 字节"
         
         return True, None
         
-    except subprocess.TimeoutExpired:
-        return False, "操作超时,用户可能取消了授权"
+    except PermissionError as e:
+        return False, f"权限不足: {str(e)}"
     except Exception as e:
         return False, f"复制失败: {str(e)}"
 
@@ -589,9 +543,12 @@ class MainWindow(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
-        # 默认配置文件路径
-        self.vpn_config_path = "/usr/local/lib/ov2n/core/openvpn/client.ovpn"
-        self.v2ray_config_path = "/usr/local/lib/ov2n/core/xray/config.json"
+        # 默认配置文件路径 - 使用用户目录,避免需要 root 权限
+        config_dir = os.path.expanduser("~/.config/ov2n")
+        os.makedirs(config_dir, exist_ok=True)
+        
+        self.vpn_config_path = os.path.join(config_dir, "client.ovpn")
+        self.v2ray_config_path = os.path.join(config_dir, "config.json")
 
         # 检查默认配置文件是否存在且不为空
         self._check_default_configs()
@@ -733,8 +690,8 @@ class MainWindow(QMainWindow):
         self.label.setText("正在导入 OpenVPN 配置...")
         self.progress_bar.setValue(20)
 
-        # 使用 pkexec 复制文件
-        success, error_msg = copy_file_with_sudo(path, self.vpn_config_path)
+        # 直接复制文件到用户目录
+        success, error_msg = copy_config_file(path, self.vpn_config_path)
 
         if success:
             try:
@@ -754,9 +711,8 @@ class MainWindow(QMainWindow):
                 "导入失败",
                 f"无法导入 OpenVPN 配置文件:\n\n{error_msg}\n\n"
                 "请确保:\n"
-                "1. 已授予管理员权限\n"
-                "2. 源文件存在且可读\n"
-                "3. 目标目录可写"
+                "1. 源文件存在且可读\n"
+                "2. 源文件不为空"
             )
             self.label.setText("✗ OpenVPN 配置导入失败")
             self.progress_bar.setValue(0)
@@ -776,8 +732,8 @@ class MainWindow(QMainWindow):
         self.label.setText("正在导入 V2Ray 配置...")
         self.progress_bar.setValue(20)
 
-        # 使用 pkexec 复制文件
-        success, error_msg = copy_file_with_sudo(path, self.v2ray_config_path)
+        # 直接复制文件到用户目录
+        success, error_msg = copy_config_file(path, self.v2ray_config_path)
 
         if success:
             try:
@@ -800,9 +756,8 @@ class MainWindow(QMainWindow):
                 "导入失败",
                 f"无法导入 V2Ray 配置文件:\n\n{error_msg}\n\n"
                 "请确保:\n"
-                "1. 已授予管理员权限\n"
-                "2. 源文件存在且可读\n"
-                "3. 配置文件格式正确 (有效的 JSON)"
+                "1. 源文件存在且可读\n"
+                "2. 配置文件格式正确 (有效的 JSON)"
             )
             self.label.setText("✗ V2Ray 配置导入失败")
             self.progress_bar.setValue(0)
