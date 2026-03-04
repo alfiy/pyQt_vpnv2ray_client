@@ -17,6 +17,13 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 from core.worker import WorkerThread
+import shutil
+import tempfile
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+OPENVPN_DIR = os.path.join(BASE_DIR, "core", "openvpn")
+XRAY_DIR = os.path.join(BASE_DIR, "core", "xray")
 
 # TProxy 配置持久化文件路径
 TPROXY_CONF_PATH = os.path.expanduser("~/.config/ov2n/tproxy.conf")
@@ -77,7 +84,7 @@ def save_tproxy_config(enabled, vps_ip, port, mark, table):
 
 def parse_v2ray_config(config_path):
     """
-    解析 V2Ray config.json，提取 VPS IP 和 TProxy 端口
+    解析 V2Ray config.json,提取 VPS IP 和 TProxy 端口
 
     Returns:
         dict: {"vps_ip": str or None, "tproxy_port": int or None}
@@ -91,7 +98,7 @@ def parse_v2ray_config(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
             content = f.read().strip()
         if not content:
-            # 文件为空，静默跳过
+            # 文件为空,静默跳过
             return result
         config = json.loads(content)
     except (json.JSONDecodeError, IOError, OSError) as e:
@@ -285,10 +292,105 @@ def find_available_table(start=100, max_val=252):
     return start
 
 
+def copy_file_with_sudo(src, dst):
+    """
+    使用 pkexec 以 root 权限复制文件
+    
+    Args:
+        src: 源文件路径
+        dst: 目标文件路径
+        
+    Returns:
+        tuple: (success: bool, error_msg: str or None)
+    """
+    try:
+        # 先验证源文件存在且可读
+        if not os.path.exists(src):
+            return False, f"源文件不存在: {src}"
+        
+        if not os.path.isfile(src):
+            return False, f"源路径不是文件: {src}"
+        
+        # 读取源文件内容
+        with open(src, 'rb') as f:
+            content = f.read()
+        
+        if len(content) == 0:
+            return False, f"源文件为空: {src}"
+        
+        # 创建临时文件
+        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.tmp') as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        
+        # 确保目标目录存在
+        dst_dir = os.path.dirname(dst)
+        
+        # 使用 pkexec 创建目录
+        mkdir_cmd = ["pkexec", "mkdir", "-p", dst_dir]
+        mkdir_result = subprocess.run(
+            mkdir_cmd,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if mkdir_result.returncode != 0:
+            os.unlink(tmp_path)
+            return False, f"创建目录失败: {mkdir_result.stderr}"
+        
+        # 使用 pkexec 复制文件
+        cp_cmd = ["pkexec", "cp", "-f", tmp_path, dst]
+        cp_result = subprocess.run(
+            cp_cmd,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        # 清理临时文件
+        os.unlink(tmp_path)
+        
+        if cp_result.returncode != 0:
+            return False, f"复制文件失败: {cp_result.stderr}"
+        
+        # 验证复制是否成功
+        verify_cmd = ["pkexec", "test", "-f", dst]
+        verify_result = subprocess.run(
+            verify_cmd,
+            capture_output=True,
+            timeout=10
+        )
+        
+        if verify_result.returncode != 0:
+            return False, f"文件复制后验证失败: {dst}"
+        
+        # 获取文件大小验证
+        stat_cmd = ["pkexec", "stat", "-c", "%s", dst]
+        stat_result = subprocess.run(
+            stat_cmd,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if stat_result.returncode == 0:
+            dst_size = int(stat_result.stdout.strip())
+            if dst_size != len(content):
+                return False, f"文件大小不匹配: 原始 {len(content)} 字节, 目标 {dst_size} 字节"
+        
+        return True, None
+        
+    except subprocess.TimeoutExpired:
+        return False, "操作超时,用户可能取消了授权"
+    except Exception as e:
+        return False, f"复制失败: {str(e)}"
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Ov2n Client")
+        self.setWindowTitle("Ov2N Client")
         self.setGeometry(200, 200, 360, 650)
 
         # 设置窗口图标
@@ -324,7 +426,7 @@ class MainWindow(QMainWindow):
         self.select_v2ray_button = QPushButton("📁 选择 V2Ray 配置")
         self.select_v2ray_button.setStyleSheet("padding: 10px; font-size: 13px;")
         
-        self.start_button = QPushButton("🚀 启动 VPN + V2Ray")
+        self.start_button = QPushButton("🚀 启动 Ov2N")
         self.start_button.setStyleSheet("""
             QPushButton {
                 background-color: #4CAF50;
@@ -386,7 +488,7 @@ class MainWindow(QMainWindow):
         # 启用复选框
         self.tproxy_checkbox = QCheckBox("启用透明代理")
         self.tproxy_checkbox.setChecked(tproxy_conf["enabled"])
-        self.tproxy_checkbox.setToolTip("启用后,启动 VPN + V2Ray 时将自动配置 iptables tproxy 规则")
+        self.tproxy_checkbox.setToolTip("启用后,启动 Ov2N 时将自动配置 iptables tproxy 规则")
         tproxy_layout.addRow(self.tproxy_checkbox)
 
         # VPS IP (带自动检测提示)
@@ -394,7 +496,7 @@ class MainWindow(QMainWindow):
         self.vps_ip_input = QLineEdit(tproxy_conf["vps_ip"])
         self.vps_ip_input.setPlaceholderText("自动从 V2Ray 配置获取")
         self.vps_ip_input.setToolTip(
-            "VPS 服务器 IP，此 IP 的流量将被排除，防止代理循环\n"
+            "VPS 服务器 IP,此 IP 的流量将被排除,防止代理循环\n"
             "选择 V2Ray 配置文件后将自动填充"
         )
         self.vps_ip_auto_label = QLabel("")
@@ -454,7 +556,7 @@ class MainWindow(QMainWindow):
             "padding: 5px; font-size: 12px; color: #2196F3;"
         )
         self.auto_detect_button.setToolTip(
-            "检测系统中已使用的 fwmark 和路由表值，\n"
+            "检测系统中已使用的 fwmark 和路由表值,\n"
             "自动分配不冲突的值"
         )
         self.auto_detect_button.clicked.connect(self._auto_detect_mark_and_table)
@@ -488,16 +590,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
         # 默认配置文件路径
-        self.vpn_config_path = os.path.join(os.getcwd(), "core/openvpn/client.ovpn")
-        self.v2ray_config_path = os.path.join(os.getcwd(), "core/xray/config.json")
+        self.vpn_config_path = "/usr/local/lib/ov2n/core/openvpn/client.ovpn"
+        self.v2ray_config_path = "/usr/local/lib/ov2n/core/xray/config.json"
 
-        # 检查默认配置文件是否存在
-        if os.path.exists(self.vpn_config_path):
-            self.vpn_path_label.setText(f"OpenVPN 配置: {os.path.basename(self.vpn_config_path)}")
-        if os.path.exists(self.v2ray_config_path):
-            self.v2ray_path_label.setText(f"V2Ray 配置: {os.path.basename(self.v2ray_config_path)}")
-            # 自动解析默认 V2Ray 配置
-            self._auto_fill_from_v2ray_config(self.v2ray_config_path)
+        # 检查默认配置文件是否存在且不为空
+        self._check_default_configs()
 
         # 绑定按钮事件
         self.start_button.clicked.connect(self.start_worker)
@@ -506,6 +603,48 @@ class MainWindow(QMainWindow):
         self.select_v2ray_button.clicked.connect(self.select_v2ray_config)
 
         self.worker = None
+
+    def _check_default_configs(self):
+        """检查默认配置文件是否存在且有效"""
+        # 检查 OpenVPN 配置
+        if os.path.exists(self.vpn_config_path):
+            try:
+                size = os.path.getsize(self.vpn_config_path)
+                if size > 0:
+                    self.vpn_path_label.setText(
+                        f"OpenVPN 配置: {os.path.basename(self.vpn_config_path)} ({size} 字节)"
+                    )
+                    self.vpn_path_label.setStyleSheet("color: #4CAF50; font-size: 12px;")
+                else:
+                    self.vpn_path_label.setText("OpenVPN 配置: 文件为空,请导入")
+                    self.vpn_path_label.setStyleSheet("color: #ff9800; font-size: 12px;")
+            except:
+                self.vpn_path_label.setText("OpenVPN 配置: 读取失败")
+                self.vpn_path_label.setStyleSheet("color: #f44336; font-size: 12px;")
+        else:
+            self.vpn_path_label.setText("OpenVPN 配置: 未导入")
+            self.vpn_path_label.setStyleSheet("color: #666; font-size: 12px;")
+
+        # 检查 V2Ray 配置
+        if os.path.exists(self.v2ray_config_path):
+            try:
+                size = os.path.getsize(self.v2ray_config_path)
+                if size > 0:
+                    self.v2ray_path_label.setText(
+                        f"V2Ray 配置: {os.path.basename(self.v2ray_config_path)} ({size} 字节)"
+                    )
+                    self.v2ray_path_label.setStyleSheet("color: #4CAF50; font-size: 12px;")
+                    # 自动填充 tproxy 配置
+                    self._auto_fill_from_v2ray_config(self.v2ray_config_path)
+                else:
+                    self.v2ray_path_label.setText("V2Ray 配置: 文件为空,请导入")
+                    self.v2ray_path_label.setStyleSheet("color: #ff9800; font-size: 12px;")
+            except:
+                self.v2ray_path_label.setText("V2Ray 配置: 读取失败")
+                self.v2ray_path_label.setStyleSheet("color: #f44336; font-size: 12px;")
+        else:
+            self.v2ray_path_label.setText("V2Ray 配置: 未导入")
+            self.v2ray_path_label.setStyleSheet("color: #666; font-size: 12px;")
 
     # ------------------- 自动检测辅助 -------------------
     def _auto_fill_from_v2ray_config(self, config_path):
@@ -584,32 +723,93 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择 OpenVPN 配置文件",
-            os.path.join(os.getcwd(), "core/openvpn"),
+            os.path.expanduser("~"),
             "OVPN 文件 (*.ovpn);;所有文件 (*)"
         )
-        if path:
-            self.vpn_config_path = path
-            self.vpn_path_label.setText(f"OpenVPN 配置: {os.path.basename(path)}")
-            self.label.setText(f"已选择 OpenVPN 配置: {os.path.basename(path)}")
+
+        if not path:
+            return
+
+        self.label.setText("正在导入 OpenVPN 配置...")
+        self.progress_bar.setValue(20)
+
+        # 使用 pkexec 复制文件
+        success, error_msg = copy_file_with_sudo(path, self.vpn_config_path)
+
+        if success:
+            try:
+                size = os.path.getsize(self.vpn_config_path)
+                self.vpn_path_label.setText(
+                    f"OpenVPN 配置: {os.path.basename(self.vpn_config_path)} ({size} 字节)"
+                )
+                self.vpn_path_label.setStyleSheet("color: #4CAF50; font-size: 12px;")
+                self.label.setText("✓ OpenVPN 配置已成功导入")
+                self.progress_bar.setValue(100)
+            except Exception as e:
+                self.label.setText(f"导入后验证失败: {e}")
+                self.progress_bar.setValue(0)
+        else:
+            QMessageBox.critical(
+                self,
+                "导入失败",
+                f"无法导入 OpenVPN 配置文件:\n\n{error_msg}\n\n"
+                "请确保:\n"
+                "1. 已授予管理员权限\n"
+                "2. 源文件存在且可读\n"
+                "3. 目标目录可写"
+            )
+            self.label.setText("✗ OpenVPN 配置导入失败")
+            self.progress_bar.setValue(0)
 
     def select_v2ray_config(self):
         """选择 V2Ray 配置文件"""
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择 V2Ray 配置文件",
-            os.path.join(os.getcwd(), "core/xray"),
+            os.path.expanduser("~"),
             "JSON 文件 (*.json);;所有文件 (*)"
         )
-        if path:
-            self.v2ray_config_path = path
-            self.v2ray_path_label.setText(f"V2Ray 配置: {os.path.basename(path)}")
-            self.label.setText(f"已选择 V2Ray 配置: {os.path.basename(path)}")
-            # 自动从新选择的 V2Ray 配置中提取 VPS IP 和 TProxy 端口
-            self._auto_fill_from_v2ray_config(path)
+
+        if not path:
+            return
+
+        self.label.setText("正在导入 V2Ray 配置...")
+        self.progress_bar.setValue(20)
+
+        # 使用 pkexec 复制文件
+        success, error_msg = copy_file_with_sudo(path, self.v2ray_config_path)
+
+        if success:
+            try:
+                size = os.path.getsize(self.v2ray_config_path)
+                self.v2ray_path_label.setText(
+                    f"V2Ray 配置: {os.path.basename(self.v2ray_config_path)} ({size} 字节)"
+                )
+                self.v2ray_path_label.setStyleSheet("color: #4CAF50; font-size: 12px;")
+                self.label.setText("✓ V2Ray 配置已成功导入")
+                self.progress_bar.setValue(100)
+                
+                # 自动填充 tproxy 配置
+                self._auto_fill_from_v2ray_config(self.v2ray_config_path)
+            except Exception as e:
+                self.label.setText(f"导入后验证失败: {e}")
+                self.progress_bar.setValue(0)
+        else:
+            QMessageBox.critical(
+                self,
+                "导入失败",
+                f"无法导入 V2Ray 配置文件:\n\n{error_msg}\n\n"
+                "请确保:\n"
+                "1. 已授予管理员权限\n"
+                "2. 源文件存在且可读\n"
+                "3. 配置文件格式正确 (有效的 JSON)"
+            )
+            self.label.setText("✗ V2Ray 配置导入失败")
+            self.progress_bar.setValue(0)
 
     # ------------------- 启动/停止 Worker -------------------
     def start_worker(self):
-        """启动 VPN 连接（使用 Polkit 权限提升）"""
+        """启动 VPN 连接(使用 Polkit 权限提升)"""
         # 验证配置文件
         if not os.path.exists(self.vpn_config_path):
             QMessageBox.critical(
@@ -618,12 +818,48 @@ class MainWindow(QMainWindow):
                 f"OpenVPN 配置文件不存在:\n{self.vpn_config_path}\n\n请先选择有效的配置文件。"
             )
             return
+
+        # 检查文件是否为空
+        try:
+            vpn_size = os.path.getsize(self.vpn_config_path)
+            if vpn_size == 0:
+                QMessageBox.critical(
+                    self,
+                    "错误",
+                    "OpenVPN 配置文件为空,请重新导入配置文件。"
+                )
+                return
+        except:
+            QMessageBox.critical(
+                self,
+                "错误",
+                "无法读取 OpenVPN 配置文件,请检查文件权限。"
+            )
+            return
             
         if not os.path.exists(self.v2ray_config_path):
             QMessageBox.critical(
                 self,
                 "错误",
                 f"V2Ray 配置文件不存在:\n{self.v2ray_config_path}\n\n请先选择有效的配置文件。"
+            )
+            return
+
+        # 检查文件是否为空
+        try:
+            v2ray_size = os.path.getsize(self.v2ray_config_path)
+            if v2ray_size == 0:
+                QMessageBox.critical(
+                    self,
+                    "错误",
+                    "V2Ray 配置文件为空,请重新导入配置文件。"
+                )
+                return
+        except:
+            QMessageBox.critical(
+                self,
+                "错误",
+                "无法读取 V2Ray 配置文件,请检查文件权限。"
             )
             return
 
@@ -647,7 +883,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(
                     self,
                     "错误",
-                    f"VPS IP 地址格式不正确: {tproxy_vps_ip}\n\n请输入有效的 IPv4 地址，例如: 1.2.3.4"
+                    f"VPS IP 地址格式不正确: {tproxy_vps_ip}\n\n请输入有效的 IPv4 地址,例如: 1.2.3.4"
                 )
                 return
 
@@ -656,7 +892,7 @@ class MainWindow(QMainWindow):
 
         # 防止重复启动
         if self.worker and self.worker.isRunning():
-            QMessageBox.warning(self, "警告", "连接已在运行中，请勿重复启动。")
+            QMessageBox.warning(self, "警告", "连接已在运行中,请勿重复启动。")
             return
 
         # 显示提示信息
@@ -734,7 +970,7 @@ class MainWindow(QMainWindow):
             reply = QMessageBox.question(
                 self,
                 "确认退出",
-                "VPN 连接正在运行中，确定要退出吗？\n\n退出将自动断开连接并清理透明代理规则。",
+                "VPN 连接正在运行中,确定要退出吗?\n\n退出将自动断开连接并清理透明代理规则。",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No
             )
