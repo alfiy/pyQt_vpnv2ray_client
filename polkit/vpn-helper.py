@@ -901,6 +901,26 @@ def main():
         print("TPROXY_STATUS: CLEANED")
         sys.exit(0)
 
+    elif command == "start-v2ray-only":
+        if len(sys.argv) < 3:
+            print("用法: vpn-helper.py start-v2ray-only <v2ray_config>", file=sys.stderr)
+            sys.exit(1)
+        
+        v2ray_config = sys.argv[2]
+        if not os.path.exists(v2ray_config):
+            print(f"错误: V2Ray 配置文件不存在: {v2ray_config}", file=sys.stderr)
+            sys.exit(1)
+        
+        print("正在启动 V2Ray...")
+        v2ray_pid = start_v2ray(v2ray_config)
+        
+        if v2ray_pid:
+            print("启动成功")
+            sys.exit(0)
+        else:
+            print("启动失败", file=sys.stderr)
+            sys.exit(1)
+
     else:
         print(f"未知命令: {command}", file=sys.stderr)
         print("可用命令: start, stop, tproxy-start, tproxy-stop", file=sys.stderr)

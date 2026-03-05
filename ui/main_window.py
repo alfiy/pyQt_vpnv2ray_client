@@ -1,12 +1,10 @@
 """
 主窗口界面
-集成 Polkit 权限提升功能 + TProxy 透明代理配置
-
-增强: VPS IP 和 TProxy 端口自动从 V2Ray config.json 中获取,
-      fwmark 和路由表在检测系统已有值的基础上自动分配
+集成 Polkit 权限提升功能 + TProxy 透明代理配置 + SS URL 导入
 """
-import json
 import os
+import sys
+import time
 import subprocess
 from PyQt5.QtGui import QIcon
 import re
@@ -17,12 +15,20 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 from core.worker import WorkerThread
-import shutil
+from core.ss_config_manager import (
+    import_ss_url_from_clipboard, 
+    V2RayConfigManager,
+    SSUrlParser
+)
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-OPENVPN_DIR = os.path.join(BASE_DIR, "core", "openvpn")
-XRAY_DIR = os.path.join(BASE_DIR, "core", "xray")
+# 获取程序根目录（兼容开发和安装环境）
+def get_app_root():
+    """获取程序根目录"""
+    # 如果是打包后的程序，使用可执行文件所在目录
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    # 开发环境：使用 main.py 所在目录的父目录（因为 main_window.py 在 ui/ 下）
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # TProxy 配置持久化文件路径
 TPROXY_CONF_PATH = os.path.expanduser("~/.config/ov2n/tproxy.conf")
@@ -79,282 +85,17 @@ def save_tproxy_config(enabled, vps_ip, port, mark, table):
         print(f"保存 tproxy 配置失败: {e}")
 
 
-# ==================== 自动检测辅助函数 ====================
-
-def parse_v2ray_config(config_path):
-    """
-    解析 V2Ray config.json,提取 VPS IP 和 TProxy 端口
-
-    Returns:
-        dict: {"vps_ip": str or None, "tproxy_port": int or None}
-    """
-    result = {"vps_ip": None, "tproxy_port": None}
-
-    if not config_path or not os.path.exists(config_path):
-        return result
-
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-        if not content:
-            # 文件为空,静默跳过
-            return result
-        config = json.loads(content)
-    except (json.JSONDecodeError, IOError, OSError) as e:
-        print(f"解析 V2Ray 配置文件失败: {e}")
-        return result
-
-    # 1. 提取 VPS IP: 从第一个非 direct/freedom outbound 的 servers[0].address 或 vnext[0].address 获取
-    outbounds = config.get("outbounds", [])
-    for ob in outbounds:
-        tag = ob.get("tag", "")
-        protocol = ob.get("protocol", "")
-        # 跳过 direct 和 freedom 类型的 outbound
-        if tag == "direct" or protocol == "freedom":
-            continue
-        settings = ob.get("settings", {})
-        # shadowsocks / trojan 等使用 servers
-        servers = settings.get("servers", [])
-        if servers and isinstance(servers, list):
-            addr = servers[0].get("address", "")
-            if addr:
-                result["vps_ip"] = addr
-                break
-        # vmess / vless 等使用 vnext
-        vnext = settings.get("vnext", [])
-        if vnext and isinstance(vnext, list):
-            addr = vnext[0].get("address", "")
-            if addr:
-                result["vps_ip"] = addr
-                break
-
-    # 2. 提取 TProxy 端口: 从 dokodemo-door inbound (tag 含 tproxy 或 sockopt.tproxy 存在) 获取
-    inbounds = config.get("inbounds", [])
-    for ib in inbounds:
-        tag = ib.get("tag", "")
-        protocol = ib.get("protocol", "")
-        stream = ib.get("streamSettings", {})
-        sockopt = stream.get("sockopt", {})
-        tproxy_mode = sockopt.get("tproxy", "")
-
-        # 匹配条件: dokodemo-door 协议 + (tag 含 tproxy 或 sockopt.tproxy 存在)
-        if protocol == "dokodemo-door" and (
-            "tproxy" in tag.lower() or tproxy_mode
-        ):
-            port = ib.get("port")
-            if port and isinstance(port, int):
-                result["tproxy_port"] = port
-                break
-
-    return result
-
-
-def detect_system_fwmarks():
-    """
-    检测系统中已使用的 fwmark 值
-
-    通过 `ip rule list` 和 `iptables -t mangle -L` 检测
-
-    Returns:
-        set: 已使用的 fwmark 值集合
-    """
-    used_marks = set()
-
-    # 方法 1: 从 ip rule 中检测
-    try:
-        result = subprocess.run(
-            ["ip", "rule", "list"],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                # 格式: "32765: from all fwmark 0x1 lookup 100"
-                match = re.search(r'fwmark\s+(0x[0-9a-fA-F]+|\d+)', line)
-                if match:
-                    val = match.group(1)
-                    if val.startswith("0x"):
-                        used_marks.add(int(val, 16))
-                    else:
-                        used_marks.add(int(val))
-    except Exception as e:
-        print(f"检测 ip rule fwmark 失败: {e}")
-
-    # 方法 2: 从 iptables mangle 表中检测
-    try:
-        result = subprocess.run(
-            ["iptables", "-t", "mangle", "-L", "-n", "--line-numbers"],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                match = re.search(r'(?:MARK set|mark match)\s+(0x[0-9a-fA-F]+|\d+)', line)
-                if match:
-                    val = match.group(1)
-                    if val.startswith("0x"):
-                        used_marks.add(int(val, 16))
-                    else:
-                        used_marks.add(int(val))
-    except Exception as e:
-        print(f"检测 iptables fwmark 失败: {e}")
-
-    return used_marks
-
-
-def detect_system_route_tables():
-    """
-    检测系统中已使用的策略路由表编号
-
-    通过 `ip rule list` 和 /etc/iproute2/rt_tables 检测
-
-    Returns:
-        set: 已使用的路由表编号集合
-    """
-    used_tables = set()
-
-    # 从 ip rule 中检测
-    try:
-        result = subprocess.run(
-            ["ip", "rule", "list"],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                match = re.search(r'lookup\s+(\d+)', line)
-                if match:
-                    table_num = int(match.group(1))
-                    # 排除系统默认表 (main=254, default=253, local=255)
-                    if table_num < 253:
-                        used_tables.add(table_num)
-    except Exception as e:
-        print(f"检测路由表失败: {e}")
-
-    # 也检查 /etc/iproute2/rt_tables 中的自定义表
-    try:
-        rt_tables_path = "/etc/iproute2/rt_tables"
-        if os.path.exists(rt_tables_path):
-            with open(rt_tables_path, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        try:
-                            table_num = int(parts[0])
-                            if 1 <= table_num < 253:
-                                used_tables.add(table_num)
-                        except ValueError:
-                            pass
-    except Exception as e:
-        print(f"读取 rt_tables 失败: {e}")
-
-    return used_tables
-
-
-def find_available_mark(start=1, max_val=255):
-    """
-    找到一个未被系统使用的 fwmark 值
-
-    Args:
-        start: 起始值 (默认 1)
-        max_val: 最大值 (默认 255)
-
-    Returns:
-        int: 可用的 fwmark 值
-    """
-    used = detect_system_fwmarks()
-    candidate = start
-    while candidate <= max_val:
-        if candidate not in used:
-            return candidate
-        candidate += 1
-    return start
-
-
-def find_available_table(start=100, max_val=252):
-    """
-    找到一个未被系统使用的路由表编号
-
-    Args:
-        start: 起始值 (默认 100)
-        max_val: 最大值 (默认 252)
-
-    Returns:
-        int: 可用的路由表编号
-    """
-    used = detect_system_route_tables()
-    candidate = start
-    while candidate <= max_val:
-        if candidate not in used:
-            return candidate
-        candidate += 1
-    return start
-
-
-def copy_config_file(src, dst):
-    """
-    复制配置文件到用户目录
-    
-    Args:
-        src: 源文件路径
-        dst: 目标文件路径
-        
-    Returns:
-        tuple: (success: bool, error_msg: str or None)
-    """
-    try:
-        # 验证源文件存在且可读
-        if not os.path.exists(src):
-            return False, f"源文件不存在: {src}"
-        
-        if not os.path.isfile(src):
-            return False, f"源路径不是文件: {src}"
-        
-        # 读取源文件内容
-        with open(src, 'rb') as f:
-            content = f.read()
-        
-        if len(content) == 0:
-            return False, f"源文件为空: {src}"
-        
-        # 确保目标目录存在
-        dst_dir = os.path.dirname(dst)
-        os.makedirs(dst_dir, exist_ok=True)
-        
-        # 直接复制文件
-        shutil.copyfile(src, dst)
-        
-        # 验证复制是否成功
-        if not os.path.exists(dst):
-            return False, f"文件复制后验证失败: {dst}"
-        
-        # 验证文件大小
-        dst_size = os.path.getsize(dst)
-        if dst_size != len(content):
-            return False, f"文件大小不匹配: 原始 {len(content)} 字节, 目标 {dst_size} 字节"
-        
-        return True, None
-        
-    except PermissionError as e:
-        return False, f"权限不足: {str(e)}"
-    except Exception as e:
-        return False, f"复制失败: {str(e)}"
-
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Ov2N Client")
+        self.setWindowTitle("Ov2n Client")
         self.setGeometry(200, 200, 360, 650)
 
         # 设置窗口图标
-        icon_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "resources",
-            "images",
-            "ov2n256.png"
-        )
-        self.setWindowIcon(QIcon(icon_path))
+        app_root = get_app_root()
+        icon_path = os.path.join(app_root, "resources", "images", "ov2n256.png")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         # 状态标签
         self.label = QLabel("状态: 就绪")
@@ -380,7 +121,7 @@ class MainWindow(QMainWindow):
         self.select_v2ray_button = QPushButton("📁 选择 V2Ray 配置")
         self.select_v2ray_button.setStyleSheet("padding: 10px; font-size: 13px;")
         
-        self.start_button = QPushButton("🚀 启动 Ov2N")
+        self.start_button = QPushButton("🚀 启动 VPN + V2Ray")
         self.start_button.setStyleSheet("""
             QPushButton {
                 background-color: #4CAF50;
@@ -417,6 +158,83 @@ class MainWindow(QMainWindow):
         """)
         self.stop_button.setEnabled(False)
 
+        # ==================== SS 配置导入区域 ====================
+        self.ss_group = QGroupBox("Shadowsocks 配置")
+        self.ss_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 13px;
+                font-weight: bold;
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 15px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+        """)
+
+        ss_layout = QVBoxLayout()
+
+        # 当前服务器显示
+        self.ss_server_label = QLabel("当前服务器: 未配置")
+        self.ss_server_label.setStyleSheet("color: #666; padding: 5px;")
+        ss_layout.addWidget(self.ss_server_label)
+
+        # 按钮行
+        ss_button_layout = QHBoxLayout()
+        
+        self.import_ss_button = QPushButton("📋 从剪贴板导入 SS 链接")
+        self.import_ss_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                padding: 8px;
+                font-size: 12px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+        """)
+        self.import_ss_button.setToolTip("从剪贴板导入 ss:// 链接并更新 V2Ray 配置")
+        self.import_ss_button.clicked.connect(self.import_ss_from_clipboard)
+        
+        self.edit_ss_button = QPushButton("✏️ 手动编辑配置")
+        self.edit_ss_button.setStyleSheet("padding: 8px; font-size: 12px;")
+        self.edit_ss_button.setToolTip("手动编辑 V2Ray 配置文件")
+        self.edit_ss_button.clicked.connect(self.edit_v2ray_config)
+        
+        ss_button_layout.addWidget(self.import_ss_button)
+        ss_button_layout.addWidget(self.edit_ss_button)
+        ss_layout.addLayout(ss_button_layout)
+
+        # 重启 V2Ray 按钮
+        self.restart_v2ray_button = QPushButton("🔄 重启 V2Ray 应用配置")
+        self.restart_v2ray_button.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9800;
+                color: white;
+                padding: 8px;
+                font-size: 12px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #F57C00;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
+        self.restart_v2ray_button.setToolTip("重启 V2Ray 进程以应用新配置（保持 VPN 连接）")
+        self.restart_v2ray_button.setEnabled(False)
+        self.restart_v2ray_button.clicked.connect(self.restart_v2ray_only)
+        ss_layout.addWidget(self.restart_v2ray_button)
+
+        self.ss_group.setLayout(ss_layout)
+
         # ==================== TProxy 配置区域 ====================
         tproxy_conf = load_tproxy_config()
 
@@ -442,79 +260,35 @@ class MainWindow(QMainWindow):
         # 启用复选框
         self.tproxy_checkbox = QCheckBox("启用透明代理")
         self.tproxy_checkbox.setChecked(tproxy_conf["enabled"])
-        self.tproxy_checkbox.setToolTip("启用后,启动 Ov2N 时将自动配置 iptables tproxy 规则")
+        self.tproxy_checkbox.setToolTip("启用后,启动 VPN + V2Ray 时将自动配置 iptables tproxy 规则")
         tproxy_layout.addRow(self.tproxy_checkbox)
 
-        # VPS IP (带自动检测提示)
-        vps_ip_layout = QHBoxLayout()
+        # VPS IP
         self.vps_ip_input = QLineEdit(tproxy_conf["vps_ip"])
-        self.vps_ip_input.setPlaceholderText("自动从 V2Ray 配置获取")
-        self.vps_ip_input.setToolTip(
-            "VPS 服务器 IP,此 IP 的流量将被排除,防止代理循环\n"
-            "选择 V2Ray 配置文件后将自动填充"
-        )
-        self.vps_ip_auto_label = QLabel("")
-        self.vps_ip_auto_label.setStyleSheet("color: #4CAF50; font-size: 11px;")
-        vps_ip_layout.addWidget(self.vps_ip_input)
-        vps_ip_layout.addWidget(self.vps_ip_auto_label)
-        tproxy_layout.addRow("VPS IP:", vps_ip_layout)
+        self.vps_ip_input.setPlaceholderText("例如: 1.2.3.4")
+        self.vps_ip_input.setToolTip("VPS 服务器 IP,此 IP 的流量将被排除,防止代理循环")
+        tproxy_layout.addRow("VPS IP:", self.vps_ip_input)
 
-        # TProxy 端口 (带自动检测提示)
-        tproxy_port_layout = QHBoxLayout()
+        # TProxy 端口
         self.tproxy_port_input = QSpinBox()
         self.tproxy_port_input.setRange(1, 65535)
         self.tproxy_port_input.setValue(tproxy_conf["port"])
-        self.tproxy_port_input.setToolTip(
-            "V2Ray/Xray 的 tproxy 入站监听端口\n"
-            "选择 V2Ray 配置文件后将自动填充"
-        )
-        self.tproxy_port_auto_label = QLabel("")
-        self.tproxy_port_auto_label.setStyleSheet("color: #4CAF50; font-size: 11px;")
-        tproxy_port_layout.addWidget(self.tproxy_port_input)
-        tproxy_port_layout.addWidget(self.tproxy_port_auto_label)
-        tproxy_layout.addRow("TProxy 端口:", tproxy_port_layout)
+        self.tproxy_port_input.setToolTip("V2Ray/Xray 的 tproxy 入站监听端口 (需与 V2Ray 配置一致)")
+        tproxy_layout.addRow("TProxy 端口:", self.tproxy_port_input)
 
-        # fwmark (带自动检测提示)
-        mark_layout = QHBoxLayout()
+        # fwmark
         self.mark_input = QSpinBox()
         self.mark_input.setRange(1, 255)
         self.mark_input.setValue(tproxy_conf["mark"])
-        self.mark_input.setToolTip(
-            "iptables fwmark 标记值\n"
-            "点击「自动检测」按钮可自动分配不冲突的值"
-        )
-        self.mark_auto_label = QLabel("")
-        self.mark_auto_label.setStyleSheet("color: #2196F3; font-size: 11px;")
-        mark_layout.addWidget(self.mark_input)
-        mark_layout.addWidget(self.mark_auto_label)
-        tproxy_layout.addRow("fwmark:", mark_layout)
+        self.mark_input.setToolTip("iptables fwmark 标记值 (默认 1)")
+        tproxy_layout.addRow("fwmark:", self.mark_input)
 
-        # 路由表 (带自动检测提示)
-        table_layout = QHBoxLayout()
+        # 路由表
         self.table_input = QSpinBox()
         self.table_input.setRange(1, 252)
         self.table_input.setValue(tproxy_conf["table"])
-        self.table_input.setToolTip(
-            "策略路由表编号\n"
-            "点击「自动检测」按钮可自动分配不冲突的值"
-        )
-        self.table_auto_label = QLabel("")
-        self.table_auto_label.setStyleSheet("color: #2196F3; font-size: 11px;")
-        table_layout.addWidget(self.table_input)
-        table_layout.addWidget(self.table_auto_label)
-        tproxy_layout.addRow("路由表:", table_layout)
-
-        # 自动检测按钮
-        self.auto_detect_button = QPushButton("🔍 自动检测 fwmark 和路由表")
-        self.auto_detect_button.setStyleSheet(
-            "padding: 5px; font-size: 12px; color: #2196F3;"
-        )
-        self.auto_detect_button.setToolTip(
-            "检测系统中已使用的 fwmark 和路由表值,\n"
-            "自动分配不冲突的值"
-        )
-        self.auto_detect_button.clicked.connect(self._auto_detect_mark_and_table)
-        tproxy_layout.addRow(self.auto_detect_button)
+        self.table_input.setToolTip("策略路由表编号 (默认 100)")
+        tproxy_layout.addRow("路由表:", self.table_input)
 
         self.tproxy_group.setLayout(tproxy_layout)
 
@@ -533,6 +307,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.v2ray_path_label)
         layout.addWidget(self.select_v2ray_button)
         layout.addSpacing(10)
+        layout.addWidget(self.ss_group)
         layout.addWidget(self.tproxy_group)
         layout.addSpacing(10)
         layout.addWidget(self.start_button)
@@ -543,15 +318,31 @@ class MainWindow(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
-        # 默认配置文件路径 - 使用用户目录,避免需要 root 权限
-        config_dir = os.path.expanduser("~/.config/ov2n")
-        os.makedirs(config_dir, exist_ok=True)
-        
-        self.vpn_config_path = os.path.join(config_dir, "client.ovpn")
-        self.v2ray_config_path = os.path.join(config_dir, "config.json")
+        # 使用用户主目录作为默认配置路径，避免权限问题
+        user_home = os.path.expanduser("~")
+        self.vpn_config_path = os.path.join(user_home, ".config", "ov2n", "client.ovpn")
+        self.v2ray_config_path = os.path.join(user_home, ".config", "ov2n", "config.json")
 
-        # 检查默认配置文件是否存在且不为空
-        self._check_default_configs()
+        # 如果用户目录下没有，尝试使用程序目录（开发环境）
+        app_root = get_app_root()
+        dev_vpn_path = os.path.join(app_root, "core", "openvpn", "client.ovpn")
+        dev_v2ray_path = os.path.join(app_root, "core", "xray", "config.json")
+
+        # 检查并创建用户配置目录
+        user_config_dir = os.path.dirname(self.v2ray_config_path)
+        os.makedirs(user_config_dir, exist_ok=True)
+
+        # 如果用户目录没有配置，但开发目录有，则复制一份
+        if not os.path.exists(self.v2ray_config_path) and os.path.exists(dev_v2ray_path):
+            import shutil
+            try:
+                shutil.copy2(dev_v2ray_path, self.v2ray_config_path)
+                print(f"已复制默认配置: {dev_v2ray_path} -> {self.v2ray_config_path}")
+            except Exception as e:
+                print(f"复制默认配置失败: {e}")
+
+        # 更新显示
+        self._update_config_display()
 
         # 绑定按钮事件
         self.start_button.clicked.connect(self.start_worker)
@@ -561,94 +352,222 @@ class MainWindow(QMainWindow):
 
         self.worker = None
 
-    def _check_default_configs(self):
-        """检查默认配置文件是否存在且有效"""
-        # 检查 OpenVPN 配置
+    def _update_config_display(self):
+        """更新配置文件路径显示"""
         if os.path.exists(self.vpn_config_path):
-            try:
-                size = os.path.getsize(self.vpn_config_path)
-                if size > 0:
-                    self.vpn_path_label.setText(
-                        f"OpenVPN 配置: {os.path.basename(self.vpn_config_path)} ({size} 字节)"
-                    )
-                    self.vpn_path_label.setStyleSheet("color: #4CAF50; font-size: 12px;")
-                else:
-                    self.vpn_path_label.setText("OpenVPN 配置: 文件为空,请导入")
-                    self.vpn_path_label.setStyleSheet("color: #ff9800; font-size: 12px;")
-            except:
-                self.vpn_path_label.setText("OpenVPN 配置: 读取失败")
-                self.vpn_path_label.setStyleSheet("color: #f44336; font-size: 12px;")
+            self.vpn_path_label.setText(f"OpenVPN 配置: {os.path.basename(self.vpn_config_path)}")
         else:
-            self.vpn_path_label.setText("OpenVPN 配置: 未导入")
-            self.vpn_path_label.setStyleSheet("color: #666; font-size: 12px;")
+            self.vpn_path_label.setText("OpenVPN 配置: 未选择")
 
-        # 检查 V2Ray 配置
         if os.path.exists(self.v2ray_config_path):
-            try:
-                size = os.path.getsize(self.v2ray_config_path)
-                if size > 0:
-                    self.v2ray_path_label.setText(
-                        f"V2Ray 配置: {os.path.basename(self.v2ray_config_path)} ({size} 字节)"
-                    )
-                    self.v2ray_path_label.setStyleSheet("color: #4CAF50; font-size: 12px;")
-                    # 自动填充 tproxy 配置
-                    self._auto_fill_from_v2ray_config(self.v2ray_config_path)
-                else:
-                    self.v2ray_path_label.setText("V2Ray 配置: 文件为空,请导入")
-                    self.v2ray_path_label.setStyleSheet("color: #ff9800; font-size: 12px;")
-            except:
-                self.v2ray_path_label.setText("V2Ray 配置: 读取失败")
-                self.v2ray_path_label.setStyleSheet("color: #f44336; font-size: 12px;")
+            self.v2ray_path_label.setText(f"V2Ray 配置: {os.path.basename(self.v2ray_config_path)}")
+            self.update_ss_server_display()
         else:
-            self.v2ray_path_label.setText("V2Ray 配置: 未导入")
-            self.v2ray_path_label.setStyleSheet("color: #666; font-size: 12px;")
+            self.v2ray_path_label.setText("V2Ray 配置: 未选择")
 
-    # ------------------- 自动检测辅助 -------------------
-    def _auto_fill_from_v2ray_config(self, config_path):
-        """
-        从 V2Ray config.json 自动填充 VPS IP 和 TProxy 端口
-        """
-        parsed = parse_v2ray_config(config_path)
+    # ------------------- SS 配置相关方法 -------------------
+    
+    def update_ss_server_display(self):
+        """更新当前 SS 服务器显示"""
+        try:
+            if not os.path.exists(self.v2ray_config_path):
+                self.ss_server_label.setText("当前服务器: 配置文件不存在")
+                self.ss_server_label.setStyleSheet("color: #f44336; padding: 5px;")
+                return
+                
+            manager = V2RayConfigManager(self.v2ray_config_path)
+            servers = manager.get_current_servers()
+            
+            if servers:
+                # 优先显示 proxy tag 的服务器
+                proxy_server = None
+                for tag, addr, port in servers:
+                    if tag == "proxy":
+                        proxy_server = (tag, addr, port)
+                        break
+                
+                display_server = proxy_server or servers[0]
+                tag, addr, port = display_server
+                
+                self.ss_server_label.setText(f"当前服务器: {addr}:{port} (tag: {tag})")
+                self.ss_server_label.setStyleSheet("color: #4CAF50; padding: 5px;")
+            else:
+                self.ss_server_label.setText("当前服务器: 未配置 SS 服务器")
+                self.ss_server_label.setStyleSheet("color: #666; padding: 5px;")
+                
+        except Exception as e:
+            print(f"更新服务器显示失败: {e}")
+            self.ss_server_label.setText("当前服务器: 读取失败")
+            self.ss_server_label.setStyleSheet("color: #f44336; padding: 5px;")
 
-        if parsed["vps_ip"]:
-            self.vps_ip_input.setText(parsed["vps_ip"])
-            self.vps_ip_auto_label.setText("✓ 自动获取")
-        else:
-            self.vps_ip_auto_label.setText("")
-
-        if parsed["tproxy_port"]:
-            self.tproxy_port_input.setValue(parsed["tproxy_port"])
-            self.tproxy_port_auto_label.setText("✓ 自动获取")
-        else:
-            self.tproxy_port_auto_label.setText("")
-
-    def _auto_detect_mark_and_table(self):
-        """自动检测并分配不冲突的 fwmark 和路由表值"""
-        # 检测 fwmark
-        used_marks = detect_system_fwmarks()
-        available_mark = find_available_mark(start=1)
-        self.mark_input.setValue(available_mark)
-
-        if used_marks:
-            marks_str = ", ".join(str(m) for m in sorted(used_marks))
-            self.mark_auto_label.setText(f"✓ 已用: {marks_str} → 分配: {available_mark}")
-        else:
-            self.mark_auto_label.setText(f"✓ 系统无占用 → 使用: {available_mark}")
-
-        # 检测路由表
-        used_tables = detect_system_route_tables()
-        available_table = find_available_table(start=100)
-        self.table_input.setValue(available_table)
-
-        if used_tables:
-            tables_str = ", ".join(str(t) for t in sorted(used_tables))
-            self.table_auto_label.setText(f"✓ 已用: {tables_str} → 分配: {available_table}")
-        else:
-            self.table_auto_label.setText(f"✓ 系统无占用 → 使用: {available_table}")
-
-        self.label.setText(
-            f"自动检测完成: fwmark={available_mark}, 路由表={available_table}"
+    def import_ss_from_clipboard(self):
+        """从剪贴板导入 SS URL"""
+        # 确保配置目录存在
+        config_dir = os.path.dirname(self.v2ray_config_path)
+        try:
+            os.makedirs(config_dir, exist_ok=True)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"无法创建配置目录: {e}")
+            return
+        
+        # 使用 ss_config_manager 中的函数
+        success = import_ss_url_from_clipboard(
+            self, 
+            self.v2ray_config_path, 
+            replace_existing=True
         )
+        
+        if success:
+            self.update_ss_server_display()
+            self.v2ray_path_label.setText(f"V2Ray 配置: {os.path.basename(self.v2ray_config_path)} (已修改)")
+            
+            # 如果 V2Ray 正在运行，提示用户重启
+            if self.worker and self.worker.isRunning():
+                reply = QMessageBox.question(
+                    self,
+                    "重启 V2Ray",
+                    "配置已更新。是否立即重启 V2Ray 以应用新配置？\n\n"
+                    "VPN 连接将保持不断开。",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                if reply == QMessageBox.Yes:
+                    self.restart_v2ray_only()
+            else:
+                QMessageBox.information(
+                    self,
+                    "提示",
+                    "配置已保存。下次启动 VPN 时将使用新配置。"
+                )
+
+    def edit_v2ray_config(self):
+        """使用系统默认编辑器编辑 V2Ray 配置文件"""
+        # 确保文件存在
+        if not os.path.exists(self.v2ray_config_path):
+            # 创建默认配置
+            config_dir = os.path.dirname(self.v2ray_config_path)
+            try:
+                os.makedirs(config_dir, exist_ok=True)
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"无法创建配置目录: {e}")
+                return
+            
+            manager = V2RayConfigManager(self.v2ray_config_path)
+            manager.save_config()
+        
+        # 使用 xdg-open 打开默认编辑器
+        try:
+            subprocess.Popen(["xdg-open", self.v2ray_config_path])
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"无法打开编辑器: {e}")
+
+    def restart_v2ray_only(self):
+        """仅重启 V2Ray 进程（保持 OpenVPN 连接）"""
+        if not self.worker or not self.worker.isRunning():
+            QMessageBox.warning(self, "警告", "VPN 连接未运行")
+            return
+        
+        self.update_label("正在重启 V2Ray 以应用新配置...")
+        self.restart_v2ray_button.setEnabled(False)
+        
+        # 获取当前 PID
+        old_v2ray_pid = self.worker.pids.get('v2ray')
+        
+        if not old_v2ray_pid:
+            QMessageBox.warning(self, "警告", "未找到 V2Ray 进程")
+            self.restart_v2ray_button.setEnabled(True)
+            return
+        
+        try:
+            # 停止旧 V2Ray（只停止 V2Ray，保留 OpenVPN）
+            from core.polkit_helper import PolkitHelper
+            
+            # 使用 pkexec 停止 V2Ray
+            cmd = [
+                "pkexec",
+                PolkitHelper.HELPER_SCRIPT,
+                "stop",
+                "--v2ray-pid", str(old_v2ray_pid)
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode != 0:
+                # 停止失败，但可能进程已经不存在了
+                print(f"停止 V2Ray 警告: {result.stderr}")
+            
+            # 等待进程完全停止
+            time.sleep(2)
+            
+            # 启动新 V2Ray
+            # 使用 vpn-helper 的 start-v2ray-only 命令（需要先在 vpn-helper.py 中添加）
+            # 临时方案：直接启动
+            self.update_label("正在启动新的 V2Ray 进程...")
+            
+            # 查找 xray/v2ray 二进制
+            binary = None
+            for b in ['xray', 'v2ray']:
+                result = subprocess.run(['which', b], capture_output=True, text=True)
+                if result.returncode == 0:
+                    binary = result.stdout.strip()
+                    break
+            
+            if not binary:
+                raise Exception("未找到 xray 或 v2ray 可执行文件")
+            
+            # 检测版本确定启动参数
+            version_result = subprocess.run([binary, 'version'], capture_output=True, text=True)
+            if 'V2Ray 4' in version_result.stdout or 'V2Ray 3' in version_result.stdout:
+                cmd = [binary, '-config', self.v2ray_config_path]
+            else:
+                cmd = [binary, 'run', '-c', self.v2ray_config_path]
+            
+            # 启动进程
+            log_file = open("/tmp/v2ray-restart.log", "w")
+            process = subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=log_file,
+                start_new_session=True  # 脱离当前会话
+            )
+            log_file.close()
+            
+            # 等待确认启动成功
+            time.sleep(2)
+            
+            # 检查进程是否还在运行
+            try:
+                os.kill(process.pid, 0)  # 发送信号 0 检查进程是否存在
+                # 更新 PID
+                self.worker.pids['v2ray'] = process.pid
+                self.update_label(f"✅ V2Ray 已重启 (新 PID: {process.pid})")
+                self.update_ss_server_display()
+                
+                QMessageBox.information(
+                    self,
+                    "重启成功",
+                    f"V2Ray 已成功重启！\n新进程 PID: {process.pid}"
+                )
+            except ProcessLookupError:
+                # 进程已退出，检查日志
+                try:
+                    with open("/tmp/v2ray-restart.log", "r") as f:
+                        log_content = f.read(500)
+                except:
+                    log_content = "无法读取日志"
+                
+                QMessageBox.critical(
+                    self,
+                    "重启失败",
+                    f"V2Ray 启动失败，进程已退出。\n\n日志内容:\n{log_content}"
+                )
+                self.update_label("❌ V2Ray 重启失败")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"重启 V2Ray 失败: {str(e)}")
+            self.update_label(f"重启失败: {str(e)}")
+        finally:
+            self.restart_v2ray_button.setEnabled(True)
 
     # ------------------- TProxy 辅助 -------------------
     def _toggle_tproxy_inputs(self, enabled):
@@ -657,11 +576,6 @@ class MainWindow(QMainWindow):
         self.tproxy_port_input.setEnabled(enabled)
         self.mark_input.setEnabled(enabled)
         self.table_input.setEnabled(enabled)
-        self.auto_detect_button.setEnabled(enabled)
-
-        # 启用时自动检测 fwmark 和路由表
-        if enabled:
-            self._auto_detect_mark_and_table()
 
     def _validate_ip(self, ip_str):
         """验证 IPv4 地址格式"""
@@ -683,39 +597,10 @@ class MainWindow(QMainWindow):
             os.path.expanduser("~"),
             "OVPN 文件 (*.ovpn);;所有文件 (*)"
         )
-
-        if not path:
-            return
-
-        self.label.setText("正在导入 OpenVPN 配置...")
-        self.progress_bar.setValue(20)
-
-        # 直接复制文件到用户目录
-        success, error_msg = copy_config_file(path, self.vpn_config_path)
-
-        if success:
-            try:
-                size = os.path.getsize(self.vpn_config_path)
-                self.vpn_path_label.setText(
-                    f"OpenVPN 配置: {os.path.basename(self.vpn_config_path)} ({size} 字节)"
-                )
-                self.vpn_path_label.setStyleSheet("color: #4CAF50; font-size: 12px;")
-                self.label.setText("✓ OpenVPN 配置已成功导入")
-                self.progress_bar.setValue(100)
-            except Exception as e:
-                self.label.setText(f"导入后验证失败: {e}")
-                self.progress_bar.setValue(0)
-        else:
-            QMessageBox.critical(
-                self,
-                "导入失败",
-                f"无法导入 OpenVPN 配置文件:\n\n{error_msg}\n\n"
-                "请确保:\n"
-                "1. 源文件存在且可读\n"
-                "2. 源文件不为空"
-            )
-            self.label.setText("✗ OpenVPN 配置导入失败")
-            self.progress_bar.setValue(0)
+        if path:
+            self.vpn_config_path = path
+            self.vpn_path_label.setText(f"OpenVPN 配置: {os.path.basename(path)}")
+            self.label.setText(f"已选择 OpenVPN 配置: {os.path.basename(path)}")
 
     def select_v2ray_config(self):
         """选择 V2Ray 配置文件"""
@@ -725,42 +610,11 @@ class MainWindow(QMainWindow):
             os.path.expanduser("~"),
             "JSON 文件 (*.json);;所有文件 (*)"
         )
-
-        if not path:
-            return
-
-        self.label.setText("正在导入 V2Ray 配置...")
-        self.progress_bar.setValue(20)
-
-        # 直接复制文件到用户目录
-        success, error_msg = copy_config_file(path, self.v2ray_config_path)
-
-        if success:
-            try:
-                size = os.path.getsize(self.v2ray_config_path)
-                self.v2ray_path_label.setText(
-                    f"V2Ray 配置: {os.path.basename(self.v2ray_config_path)} ({size} 字节)"
-                )
-                self.v2ray_path_label.setStyleSheet("color: #4CAF50; font-size: 12px;")
-                self.label.setText("✓ V2Ray 配置已成功导入")
-                self.progress_bar.setValue(100)
-                
-                # 自动填充 tproxy 配置
-                self._auto_fill_from_v2ray_config(self.v2ray_config_path)
-            except Exception as e:
-                self.label.setText(f"导入后验证失败: {e}")
-                self.progress_bar.setValue(0)
-        else:
-            QMessageBox.critical(
-                self,
-                "导入失败",
-                f"无法导入 V2Ray 配置文件:\n\n{error_msg}\n\n"
-                "请确保:\n"
-                "1. 源文件存在且可读\n"
-                "2. 配置文件格式正确 (有效的 JSON)"
-            )
-            self.label.setText("✗ V2Ray 配置导入失败")
-            self.progress_bar.setValue(0)
+        if path:
+            self.v2ray_config_path = path
+            self.v2ray_path_label.setText(f"V2Ray 配置: {os.path.basename(path)}")
+            self.label.setText(f"已选择 V2Ray 配置: {os.path.basename(path)}")
+            self.update_ss_server_display()
 
     # ------------------- 启动/停止 Worker -------------------
     def start_worker(self):
@@ -773,48 +627,12 @@ class MainWindow(QMainWindow):
                 f"OpenVPN 配置文件不存在:\n{self.vpn_config_path}\n\n请先选择有效的配置文件。"
             )
             return
-
-        # 检查文件是否为空
-        try:
-            vpn_size = os.path.getsize(self.vpn_config_path)
-            if vpn_size == 0:
-                QMessageBox.critical(
-                    self,
-                    "错误",
-                    "OpenVPN 配置文件为空,请重新导入配置文件。"
-                )
-                return
-        except:
-            QMessageBox.critical(
-                self,
-                "错误",
-                "无法读取 OpenVPN 配置文件,请检查文件权限。"
-            )
-            return
             
         if not os.path.exists(self.v2ray_config_path):
             QMessageBox.critical(
                 self,
                 "错误",
                 f"V2Ray 配置文件不存在:\n{self.v2ray_config_path}\n\n请先选择有效的配置文件。"
-            )
-            return
-
-        # 检查文件是否为空
-        try:
-            v2ray_size = os.path.getsize(self.v2ray_config_path)
-            if v2ray_size == 0:
-                QMessageBox.critical(
-                    self,
-                    "错误",
-                    "V2Ray 配置文件为空,请重新导入配置文件。"
-                )
-                return
-        except:
-            QMessageBox.critical(
-                self,
-                "错误",
-                "无法读取 V2Ray 配置文件,请检查文件权限。"
             )
             return
 
@@ -830,8 +648,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(
                     self,
                     "错误",
-                    "启用透明代理时必须填写 VPS IP 地址。\n\n"
-                    "提示: 选择 V2Ray 配置文件后会自动填充。"
+                    "启用透明代理时必须填写 VPS IP 地址。"
                 )
                 return
             if not self._validate_ip(tproxy_vps_ip):
@@ -877,6 +694,9 @@ class MainWindow(QMainWindow):
         self.select_vpn_button.setEnabled(False)
         self.select_v2ray_button.setEnabled(False)
         self.tproxy_group.setEnabled(False)
+        self.restart_v2ray_button.setEnabled(True)
+        self.import_ss_button.setEnabled(False)
+        self.edit_ss_button.setEnabled(False)
 
     def stop_worker(self):
         """停止 VPN 连接"""
@@ -893,6 +713,11 @@ class MainWindow(QMainWindow):
         self.select_vpn_button.setEnabled(True)
         self.select_v2ray_button.setEnabled(True)
         self.tproxy_group.setEnabled(True)
+        self.restart_v2ray_button.setEnabled(False)
+        self.import_ss_button.setEnabled(True)
+        self.edit_ss_button.setEnabled(True)
+        self.ss_server_label.setText("当前服务器: 未连接")
+        self.ss_server_label.setStyleSheet("color: #666; padding: 5px;")
 
     def update_label(self, text):
         """更新状态标签"""
@@ -915,6 +740,9 @@ class MainWindow(QMainWindow):
         self.select_vpn_button.setEnabled(True)
         self.select_v2ray_button.setEnabled(True)
         self.tproxy_group.setEnabled(True)
+        self.restart_v2ray_button.setEnabled(False)
+        self.import_ss_button.setEnabled(True)
+        self.edit_ss_button.setEnabled(True)
 
     # ------------------- 关闭窗口处理 -------------------
     def closeEvent(self, event):

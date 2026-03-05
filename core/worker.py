@@ -2,7 +2,9 @@
 后台工作线程
 负责启动和管理 VPN 连接,以及配置透明代理
 """
+import subprocess
 import time
+from typing import Optional, Tuple
 from PyQt5.QtCore import QThread, pyqtSignal
 from core.polkit_helper import PolkitHelper
 
@@ -147,3 +149,47 @@ class WorkerThread(QThread):
                 self.error_signal.emit(message)
             
             self.pids = {}
+
+    def restart_v2ray(self, new_config_path: str = None) -> Tuple[bool, str, Optional[int]]:
+        """
+        热重启 V2Ray（保持 OpenVPN 连接）
+        
+        Returns:
+            tuple: (success, message, new_pid)
+        """
+        from core.polkit_helper import PolkitHelper
+        
+        # 停止现有 V2Ray
+        old_pid = self.pids.get('v2ray')
+        if old_pid:
+            success, msg = PolkitHelper.stop_vpn({'v2ray': old_pid})
+            if not success:
+                return False, f"停止旧 V2Ray 失败: {msg}", None
+            time.sleep(1)
+        
+        # 使用 vpn-helper 启动新的 V2Ray
+        # 注意：这里需要直接调用 vpn-helper，不重启 OpenVPN
+        config_path = new_config_path or self.v2ray_config_path
+        
+        try:
+            result = subprocess.run(
+                ["pkexec", PolkitHelper.HELPER_SCRIPT, "start-v2ray-only", config_path],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if result.returncode == 0:
+                # 解析 PID
+                new_pid = None
+                for line in result.stdout.split('\n'):
+                    if 'V2Ray PID:' in line:
+                        new_pid = int(line.split(':')[1].strip())
+                        self.pids['v2ray'] = new_pid
+                        break
+                return True, "V2Ray 重启成功", new_pid
+            else:
+                return False, result.stderr, None
+                
+        except Exception as e:
+            return False, str(e), None
