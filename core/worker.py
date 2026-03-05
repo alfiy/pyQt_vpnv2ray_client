@@ -157,7 +157,6 @@ class WorkerThread(QThread):
         Returns:
             tuple: (success, message, new_pid)
         """
-        from core.polkit_helper import PolkitHelper
         
         # 停止现有 V2Ray
         old_pid = self.pids.get('v2ray')

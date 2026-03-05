@@ -17,6 +17,9 @@ import signal
 import time
 import hashlib
 import threading
+import datetime
+import shutil
+import urllib.request
 
 # ============ 最小侵入式调试日志 ============
 DEBUG_LOG = "/tmp/vpn-helper-debug.log"
@@ -24,8 +27,7 @@ DEBUG_LOG = "/tmp/vpn-helper-debug.log"
 def log_debug(msg):
     """写入调试日志"""
     try:
-        with open(DEBUG_LOG, "a", encoding="utf-8") as f:
-            import datetime
+        with open(DEBUG_LOG, "a", encoding="utf-8") as f:           
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             f.write(f"[{timestamp}] {msg}\n")
     except:
@@ -117,8 +119,7 @@ def copy_bundled_geo_file(filename, dest_dir):
     """
     从预打包路径复制 geo 文件到目标目录
     返回: (bool, str) (成功/失败, 目标文件路径或错误信息)
-    """
-    import shutil
+    """   
 
     bundled_path = find_bundled_geo_file(filename)
     if not bundled_path:
@@ -214,8 +215,7 @@ def download_geo_files_from_network(filenames):
     """
     从网络下载指定的 geo 文件
     返回: 下载失败的文件列表
-    """
-    import urllib.request
+    """   
 
     download_failed = []
 
@@ -265,8 +265,7 @@ def check_geo_updates_async():
     """
     异步检查 geo 文件是否有更新 (在后台线程中运行)
     通过比较文件大小和 HTTP Content-Length 来判断是否需要更新
-    """
-    import urllib.request
+    """   
 
     log_debug("update_check: 开始异步检查 geo 文件更新")
 
@@ -307,7 +306,6 @@ def check_geo_updates_async():
 
 def _download_update(filename, urls, filepath):
     """下载更新的 geo 文件 (替换现有文件)"""
-    import urllib.request
 
     tmp_path = filepath + ".tmp"
 

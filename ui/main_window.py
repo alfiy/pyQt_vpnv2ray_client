@@ -20,6 +20,7 @@ from core.ss_config_manager import (
     V2RayConfigManager,
     SSUrlParser
 )
+from core.polkit_helper import PolkitHelper
 
 # 获取程序根目录（兼容开发和安装环境）
 def get_app_root():
@@ -479,8 +480,7 @@ class MainWindow(QMainWindow):
             return
         
         try:
-            # 停止旧 V2Ray（只停止 V2Ray，保留 OpenVPN）
-            from core.polkit_helper import PolkitHelper
+            # 停止旧 V2Ray（只停止 V2Ray，保留 OpenVPN）            
             
             # 使用 pkexec 停止 V2Ray
             cmd = [
