@@ -33,8 +33,80 @@ def get_app_root():
     # 开发环境:使用 main.py 所在目录的父目录(因为 main_window.py 在 ui/ 下)
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# TProxy 配置持久化文件路径
+# 配置文件路径
 TPROXY_CONF_PATH = os.path.expanduser("~/.config/ov2n/tproxy.conf")
+CONFIG_PATHS_FILE = os.path.expanduser("~/.config/ov2n/config_paths.json")
+
+
+def load_config_paths():
+    """
+    加载上次使用的配置文件路径
+    
+    Returns:
+        dict: {
+            'vpn_config': str,    # OpenVPN 配置文件路径
+            'v2ray_config': str   # V2Ray 配置文件路径
+        }
+    """
+    defaults = {
+        'vpn_config': os.path.expanduser("~/.config/ov2n/client.ovpn"),
+        'v2ray_config': os.path.expanduser("~/.config/ov2n/config.json")
+    }
+    
+    if not os.path.exists(CONFIG_PATHS_FILE):
+        return defaults
+    
+    try:
+        with open(CONFIG_PATHS_FILE, 'r', encoding='utf-8') as f:
+            saved_paths = json.load(f)
+        
+        # 验证保存的路径是否仍然存在
+        vpn_path = saved_paths.get('vpn_config', defaults['vpn_config'])
+        v2ray_path = saved_paths.get('v2ray_config', defaults['v2ray_config'])
+        
+        # 如果保存的路径不存在,回退到默认路径
+        if not os.path.exists(vpn_path):
+            print(f"保存的 OpenVPN 配置不存在: {vpn_path}, 使用默认路径")
+            vpn_path = defaults['vpn_config']
+        
+        if not os.path.exists(v2ray_path):
+            print(f"保存的 V2Ray 配置不存在: {v2ray_path}, 使用默认路径")
+            v2ray_path = defaults['v2ray_config']
+        
+        return {
+            'vpn_config': vpn_path,
+            'v2ray_config': v2ray_path
+        }
+        
+    except Exception as e:
+        print(f"加载配置路径失败: {e}")
+        return defaults
+
+
+def save_config_paths(vpn_config, v2ray_config):
+    """
+    保存当前使用的配置文件路径
+    
+    Args:
+        vpn_config: OpenVPN 配置文件路径
+        v2ray_config: V2Ray 配置文件路径
+    """
+    try:
+        config_dir = os.path.dirname(CONFIG_PATHS_FILE)
+        os.makedirs(config_dir, exist_ok=True)
+        
+        paths = {
+            'vpn_config': vpn_config,
+            'v2ray_config': v2ray_config
+        }
+        
+        with open(CONFIG_PATHS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(paths, f, indent=2, ensure_ascii=False)
+        
+        print(f"✓ 配置路径已保存: VPN={os.path.basename(vpn_config)}, V2Ray={os.path.basename(v2ray_config)}")
+        
+    except Exception as e:
+        print(f"保存配置路径失败: {e}")
 
 
 def load_tproxy_config():
@@ -399,12 +471,15 @@ class MainWindow(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
-        # 使用用户主目录作为默认配置路径,避免权限问题
-        user_home = os.path.expanduser("~")
-        self.vpn_config_path = os.path.join(user_home, ".config", "ov2n", "client.ovpn")
-        self.v2ray_config_path = os.path.join(user_home, ".config", "ov2n", "config.json")
+        # ==================== 加载配置路径 ====================
+        # 从持久化文件加载上次使用的配置路径
+        saved_paths = load_config_paths()
+        self.vpn_config_path = saved_paths['vpn_config']
+        self.v2ray_config_path = saved_paths['v2ray_config']
+        
+        print(f"加载配置路径: VPN={self.vpn_config_path}, V2Ray={self.v2ray_config_path}")
 
-        # 如果用户目录下没有,尝试使用程序目录(开发环境)
+        # 如果配置文件不存在,尝试从开发目录复制默认配置
         app_root = get_app_root()
         dev_vpn_path = os.path.join(app_root, "core", "openvpn", "client.ovpn")
         dev_v2ray_path = os.path.join(app_root, "core", "xray", "config.json")
@@ -418,9 +493,17 @@ class MainWindow(QMainWindow):
             import shutil
             try:
                 shutil.copy2(dev_v2ray_path, self.v2ray_config_path)
-                print(f"已复制默认配置: {dev_v2ray_path} -> {self.v2ray_config_path}")
+                print(f"已复制默认 V2Ray 配置: {dev_v2ray_path} -> {self.v2ray_config_path}")
             except Exception as e:
-                print(f"复制默认配置失败: {e}")
+                print(f"复制默认 V2Ray 配置失败: {e}")
+        
+        if not os.path.exists(self.vpn_config_path) and os.path.exists(dev_vpn_path):
+            import shutil
+            try:
+                shutil.copy2(dev_vpn_path, self.vpn_config_path)
+                print(f"已复制默认 OpenVPN 配置: {dev_vpn_path} -> {self.vpn_config_path}")
+            except Exception as e:
+                print(f"复制默认 OpenVPN 配置失败: {e}")
 
         # 更新显示
         self._update_config_display()
@@ -537,10 +620,13 @@ class MainWindow(QMainWindow):
         
         if success:
             self.update_ss_server_display()
-            self.v2ray_path_label.setText(f"V2Ray 配置: {os.path.basename(self.v2ray_config_path)} (已修改)")
+            self.v2ray_path_label.setText(f"V2Ray 配置: {os.path.basename(self.v2ray_config_path)} (已更新)")
             
             # 【新增】导入成功后自动提取 TProxy 配置
             self._auto_extract_tproxy_config()
+            
+            # 【新增】保存配置路径 (V2Ray 配置已更新)
+            save_config_paths(self.vpn_config_path, self.v2ray_config_path)
             
             # 如果 V2Ray 正在运行,提示用户重启
             if self.worker and self.worker.isRunning():
@@ -718,33 +804,47 @@ class MainWindow(QMainWindow):
     # ------------------- 文件选择 -------------------
     def select_vpn_config(self):
         """选择 OpenVPN 配置文件"""
+        # 使用当前配置路径作为起始目录
+        start_dir = os.path.dirname(self.vpn_config_path) if os.path.exists(self.vpn_config_path) else os.path.expanduser("~")
+        
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择 OpenVPN 配置文件",
-            os.path.expanduser("~"),
+            start_dir,
             "OVPN 文件 (*.ovpn);;所有文件 (*)"
         )
         if path:
+            # 更新配置路径
             self.vpn_config_path = path
             self.vpn_path_label.setText(f"OpenVPN 配置: {os.path.basename(path)}")
-            self.label.setText(f"已选择 OpenVPN 配置: {os.path.basename(path)}")
+            self.label.setText(f"✓ 已选择 OpenVPN 配置: {os.path.basename(path)}")
+            
+            # 【新增】保存配置路径
+            save_config_paths(self.vpn_config_path, self.v2ray_config_path)
 
     def select_v2ray_config(self):
         """选择 V2Ray 配置文件"""
+        # 使用当前配置路径作为起始目录
+        start_dir = os.path.dirname(self.v2ray_config_path) if os.path.exists(self.v2ray_config_path) else os.path.expanduser("~")
+        
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择 V2Ray 配置文件",
-            os.path.expanduser("~"),
+            start_dir,
             "JSON 文件 (*.json);;所有文件 (*)"
         )
         if path:
+            # 更新配置路径
             self.v2ray_config_path = path
             self.v2ray_path_label.setText(f"V2Ray 配置: {os.path.basename(path)}")
-            self.label.setText(f"已选择 V2Ray 配置: {os.path.basename(path)}")
+            self.label.setText(f"✓ 已选择 V2Ray 配置: {os.path.basename(path)}")
             self.update_ss_server_display()
             
             # 【新增】选择配置后自动提取 TProxy 参数
             self._auto_extract_tproxy_config()
+            
+            # 【新增】保存配置路径
+            save_config_paths(self.vpn_config_path, self.v2ray_config_path)
 
     # ------------------- 启动/停止 Worker -------------------
     def start_worker(self):
