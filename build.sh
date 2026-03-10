@@ -787,8 +787,8 @@ fi
 
 echo -e "${BLUE}"
 echo "╔════════════════════════════════════════╗"
-echo "║         Build Completed!               ║"
-echo "║       ov2n v${VERSION} is ready             ║"
+echo "         Build Completed!                 "
+echo "       ov2n v${VERSION} is ready           "
 echo "╚════════════════════════════════════════╝"
 echo -e "${NC}"
 

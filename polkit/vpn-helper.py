@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-VPN Helper Script for Polkit (增强版)
+VPN Helper Script for Polkit (增强版 - 优化 Geo 更新逻辑)
 此脚本由 pkexec 以 root 权限调用,负责启动和停止 VPN 服务
 以及配置透明代理 (tproxy) 的 iptables 规则
 
 增强功能:
 - 优先使用预打包的 geo 文件 (resources 目录)
-- 运行时异步检查 geo 文件更新
+- 运行时异步检查 geo 文件更新 (带超时控制)
 - 自动检测 V2Ray 版本并使用正确的启动命令
 - 完善的错误处理和日志记录
+- 超时 30 秒后使用原有文件,不阻塞启动
 """
 import sys
 import subprocess
@@ -20,6 +21,8 @@ import threading
 import datetime
 import shutil
 import urllib.request
+import socket
+
 
 # ============ 最小侵入式调试日志 ============
 DEBUG_LOG = "/tmp/vpn-helper-debug.log"
@@ -36,7 +39,9 @@ def log_debug(msg):
 
 # ============ Geo 文件相关常量 ============
 GEO_DIR = "/usr/local/share/v2ray"
-GEO_MIN_SIZE = 102400  # 100KB，有效 geo 文件的最小大小
+GEO_MIN_SIZE = 102400  # 100KB,有效 geo 文件的最小大小
+GEO_DOWNLOAD_TIMEOUT = 30  # 单个文件下载超时时间 (秒)
+GEO_TOTAL_TIMEOUT = 60  # 所有 geo 文件下载总超时 (秒)
 
 # 预打包 geo 文件的可能位置 (按优先级排列)
 BUNDLED_GEO_PATHS = [
@@ -62,19 +67,49 @@ GEO_FILES_CONFIG = {
 }
 # ===========================================
 
-
 def find_xray_binary():
-    """查找 xray 或 v2ray 可执行文件"""
-    for binary in ['xray', 'v2ray']:
-        result = subprocess.run(
-            ['which', binary],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    return None
+    """
+    查找 xray 或 v2ray 可执行文件
+    优先使用绝对路径，再尝试 PATH 查找
+    """
+    candidates = [
+        '/usr/local/bin/xray',
+        '/usr/local/bin/v2ray',
+    ]
 
+    # 1️⃣ 检查绝对路径
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            log_debug(f"找到二进制文件: {path}")
+            return path
+
+    # 2️⃣ 确保 PATH 包含 /usr/local/bin
+    current_path = os.environ.get('PATH', '')
+    if '/usr/local/bin' not in current_path:
+        os.environ['PATH'] = current_path + os.pathsep + '/usr/local/bin'
+        log_debug(f"PATH 更新为: {os.environ['PATH']}")
+
+    # 3️⃣ 尝试 PATH 查找
+    for binary in ['xray', 'v2ray']:
+        try:
+            result = subprocess.run(
+                ['which', binary],
+                capture_output=True,
+                text=True
+            )
+            log_debug(f"which {binary} -> returncode={result.returncode}, stdout={result.stdout!r}")
+            
+            if result.returncode == 0:
+                path_found = result.stdout.strip()
+                if os.path.isfile(path_found) and os.access(path_found, os.X_OK):
+                    log_debug(f"PATH 查找成功: {path_found}")
+                    return path_found
+        except Exception as e:
+            log_debug(f"查找 {binary} 出错: {e}")
+            continue
+
+    log_debug("未找到 xray/v2ray 可执行文件")
+    return None
 
 def is_geo_file_valid(filepath):
     """
@@ -136,14 +171,56 @@ def copy_bundled_geo_file(filename, dest_dir):
         return False, str(e)
 
 
+def download_with_timeout(url, timeout=30):
+    """
+    带超时的文件下载
+    
+    Args:
+        url: 下载 URL
+        timeout: 超时时间 (秒)
+    
+    Returns:
+        bytes: 下载的数据,失败返回 None
+    """
+    try:
+        # 设置全局 socket 超时
+        original_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(timeout)
+        
+        req = urllib.request.Request(
+            url,
+            headers={'User-Agent': 'OV2N-VPN-Helper/1.4.0'}
+        )
+        
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            data = response.read()
+        
+        # 恢复原超时设置
+        socket.setdefaulttimeout(original_timeout)
+        
+        return data
+        
+    except (urllib.error.URLError, socket.timeout, OSError) as e:
+        log_debug(f"download_timeout: {url} 超时或失败 - {e}")
+        # 恢复原超时设置
+        try:
+            socket.setdefaulttimeout(original_timeout)
+        except:
+            pass
+        return None
+    except Exception as e:
+        log_debug(f"download_timeout: {url} 未知错误 - {e}")
+        return None
+
+
 def check_and_prepare_geo_files():
     """
-    检查并准备 geo 文件 (优先使用预打包文件)
+    检查并准备 geo 文件 (优先使用预打包文件,带超时控制)
     
     优先级:
     1. 目标目录已有有效文件 -> 直接使用
     2. 预打包 resources 目录有文件 -> 复制到目标目录
-    3. 从网络下载 (仅在前两步都失败时)
+    3. 从网络下载 (仅在前两步都失败时,且有严格超时控制)
     
     返回: (bool, str) (成功/失败, 错误信息)
     """
@@ -191,15 +268,15 @@ def check_and_prepare_geo_files():
         create_geo_symlinks(GEO_DIR, GEO_FILES_CONFIG.keys())
         return True, ""
 
-    # 仍有缺失文件,尝试网络下载
+    # 仍有缺失文件,尝试网络下载 (带超时控制)
     print(f"警告: 检测到缺失的 geo 文件: {', '.join(missing_files)}", file=sys.stderr)
-    print("正在尝试从网络下载...", file=sys.stderr)
+    print(f"正在尝试从网络下载 (超时 {GEO_TOTAL_TIMEOUT} 秒)...", file=sys.stderr)
     log_debug(f"check_geo: 需要从网络下载: {missing_files}")
 
-    download_failed = download_geo_files_from_network(missing_files)
+    download_failed = download_geo_files_with_timeout(missing_files, GEO_TOTAL_TIMEOUT)
 
     if download_failed:
-        error_msg = f"以下 geo 文件下载失败: {', '.join(download_failed)}\n"
+        error_msg = f"以下 geo 文件下载失败或超时: {', '.join(download_failed)}\n"
         error_msg += "V2Ray 可能无法正常启动。请手动下载:\n"
         for filename in download_failed:
             error_msg += f"  sudo wget -O {GEO_DIR}/{filename} {GEO_FILES_CONFIG[filename][0]}\n"
@@ -211,43 +288,65 @@ def check_and_prepare_geo_files():
     return True, ""
 
 
-def download_geo_files_from_network(filenames):
+def download_geo_files_with_timeout(filenames, total_timeout):
     """
-    从网络下载指定的 geo 文件
-    返回: 下载失败的文件列表
-    """   
-
+    从网络下载指定的 geo 文件 (带总超时控制)
+    
+    Args:
+        filenames: 要下载的文件名列表
+        total_timeout: 总超时时间 (秒)
+    
+    Returns:
+        list: 下载失败的文件列表
+    """
     download_failed = []
+    start_time = time.time()
 
     for filename in filenames:
+        # 检查总超时
+        elapsed = time.time() - start_time
+        if elapsed >= total_timeout:
+            log_debug(f"download_timeout: 总超时 ({total_timeout}s) 已到,剩余文件跳过")
+            print(f"  ⏱ 下载超时,剩余文件跳过: {', '.join(filenames[filenames.index(filename):])}", file=sys.stderr)
+            download_failed.extend(filenames[filenames.index(filename):])
+            break
+
         urls = GEO_FILES_CONFIG[filename]
         filepath = os.path.join(GEO_DIR, filename)
         downloaded = False
+        
+        # 为单个文件分配剩余时间
+        remaining_time = total_timeout - elapsed
+        file_timeout = min(GEO_DOWNLOAD_TIMEOUT, remaining_time)
 
         for url in urls:
+            # 再次检查总超时
+            if time.time() - start_time >= total_timeout:
+                log_debug(f"download_timeout: 总超时,中断当前文件 {filename} 的下载")
+                break
+
             try:
-                print(f"  下载 {filename}: {url}", file=sys.stderr)
-                log_debug(f"download: 尝试从 {url} 下载 {filename}")
+                print(f"  下载 {filename}: {url} (超时 {file_timeout:.0f}s)", file=sys.stderr)
+                log_debug(f"download: 尝试从 {url} 下载 {filename}, 超时={file_timeout}s")
 
-                req = urllib.request.Request(
-                    url,
-                    headers={'User-Agent': 'OV2N-VPN-Helper/1.3.0'}
-                )
+                data = download_with_timeout(url, timeout=file_timeout)
 
-                with urllib.request.urlopen(req, timeout=30) as response:
-                    data = response.read()
+                if data is None:
+                    print(f"  ✗ 超时或失败", file=sys.stderr)
+                    log_debug(f"download: {filename} 从 {url} 下载失败 (超时或错误)")
+                    continue
 
-                    if len(data) < GEO_MIN_SIZE:
-                        log_debug(f"download: {filename} 太小 ({len(data)} 字节)")
-                        continue
+                if len(data) < GEO_MIN_SIZE:
+                    log_debug(f"download: {filename} 太小 ({len(data)} 字节)")
+                    continue
 
-                    with open(filepath, 'wb') as f:
-                        f.write(data)
+                with open(filepath, 'wb') as f:
+                    f.write(data)
 
-                    print(f"  ✓ {filename} 下载成功 ({len(data)} 字节)", file=sys.stderr)
-                    log_debug(f"download: {filename} 下载成功,大小 {len(data)} 字节")
-                    downloaded = True
-                    break
+                print(f"  ✓ {filename} 下载成功 ({len(data)} 字节)", file=sys.stderr)
+                log_debug(f"download: {filename} 下载成功,大小 {len(data)} 字节")
+                downloaded = True
+                break
 
             except Exception as e:
                 print(f"  ✗ 下载失败: {e}", file=sys.stderr)
@@ -256,20 +355,27 @@ def download_geo_files_from_network(filenames):
 
         if not downloaded:
             download_failed.append(filename)
-            log_debug(f"download: {filename} 所有下载源都失败")
+            log_debug(f"download: {filename} 所有下载源都失败或超时")
 
     return download_failed
 
 
 def check_geo_updates_async():
     """
-    异步检查 geo 文件是否有更新 (在后台线程中运行)
+    异步检查 geo 文件是否有更新 (在后台线程中运行,带超时控制)
     通过比较文件大小和 HTTP Content-Length 来判断是否需要更新
     """   
 
     log_debug("update_check: 开始异步检查 geo 文件更新")
+    check_start_time = time.time()
+    max_check_time = 30  # 更新检查最多 30 秒
 
     for filename, urls in GEO_FILES_CONFIG.items():
+        # 检查总超时
+        if time.time() - check_start_time >= max_check_time:
+            log_debug(f"update_check: 检查超时 ({max_check_time}s),剩余文件跳过")
+            break
+
         filepath = os.path.join(GEO_DIR, filename)
 
         if not is_geo_file_valid(filepath):
@@ -283,9 +389,11 @@ def check_geo_updates_async():
             req = urllib.request.Request(
                 url,
                 method='HEAD',
-                headers={'User-Agent': 'OV2N-VPN-Helper/1.3.0'}
+                headers={'User-Agent': 'OV2N-VPN-Helper/1.4.0'}
             )
-            with urllib.request.urlopen(req, timeout=15) as response:
+            
+            # 使用较短的超时检查
+            with urllib.request.urlopen(req, timeout=10) as response:
                 remote_size = int(response.headers.get('Content-Length', 0))
 
                 if remote_size > 0 and abs(remote_size - local_size) > 1024:
@@ -294,8 +402,20 @@ def check_geo_updates_async():
                         f"update_check: {filename} 可能有更新 "
                         f"(本地: {local_size}, 远程: {remote_size})"
                     )
-                    # 尝试下载更新
-                    _download_update(filename, urls, filepath)
+                    
+                    # 检查总超时
+                    if time.time() - check_start_time >= max_check_time:
+                        log_debug(f"update_check: 检查超时,跳过下载更新")
+                        break
+                    
+                    # 尝试下载更新 (带超时)
+                    remaining_time = max_check_time - (time.time() - check_start_time)
+                    download_timeout = min(20, remaining_time)  # 单个更新最多 20 秒
+                    
+                    if download_timeout > 5:  # 至少留 5 秒
+                        _download_update_with_timeout(filename, urls, filepath, download_timeout)
+                    else:
+                        log_debug(f"update_check: 剩余时间不足,跳过更新 {filename}")
                 else:
                     log_debug(f"update_check: {filename} 已是最新 (大小: {local_size})")
 
@@ -304,37 +424,50 @@ def check_geo_updates_async():
             # 更新检查失败不影响正常使用
 
 
-def _download_update(filename, urls, filepath):
-    """下载更新的 geo 文件 (替换现有文件)"""
-
+def _download_update_with_timeout(filename, urls, filepath, timeout):
+    """
+    下载更新的 geo 文件 (带超时控制)
+    
+    Args:
+        filename: 文件名
+        urls: 下载源列表
+        filepath: 目标路径
+        timeout: 超时时间 (秒)
+    """
     tmp_path = filepath + ".tmp"
+    download_start = time.time()
 
     for url in urls:
+        # 检查是否超时
+        elapsed = time.time() - download_start
+        if elapsed >= timeout:
+            log_debug(f"update_download: {filename} 更新超时")
+            break
+
         try:
-            log_debug(f"update_download: 从 {url} 下载 {filename} 更新")
+            remaining = timeout - elapsed
+            log_debug(f"update_download: 从 {url} 下载 {filename} 更新,剩余时间 {remaining:.1f}s")
 
-            req = urllib.request.Request(
-                url,
-                headers={'User-Agent': 'OV2N-VPN-Helper/1.3.0'}
-            )
+            data = download_with_timeout(url, timeout=remaining)
 
-            with urllib.request.urlopen(req, timeout=60) as response:
-                data = response.read()
+            if data is None:
+                log_debug(f"update_download: {filename} 从 {url} 下载超时或失败")
+                continue
 
-                if len(data) < GEO_MIN_SIZE:
-                    continue
+            if len(data) < GEO_MIN_SIZE:
+                continue
 
-                # 写入临时文件
-                with open(tmp_path, 'wb') as f:
-                    f.write(data)
+            # 写入临时文件
+            with open(tmp_path, 'wb') as f:
+                f.write(data)
 
-                # 原子替换
-                os.replace(tmp_path, filepath)
-                log_debug(f"update_download: {filename} 更新成功 ({len(data)} 字节)")
+            # 原子替换
+            os.replace(tmp_path, filepath)
+            log_debug(f"update_download: {filename} 更新成功 ({len(data)} 字节)")
 
-                # 更新符号链接
-                create_geo_symlinks(GEO_DIR, [filename])
-                return True
+            # 更新符号链接
+            create_geo_symlinks(GEO_DIR, [filename])
+            return True
 
         except Exception as e:
             log_debug(f"update_download: 从 {url} 更新失败 - {e}")
@@ -345,7 +478,7 @@ def _download_update(filename, urls, filepath):
                 pass
             continue
 
-    log_debug(f"update_download: {filename} 所有更新源都失败")
+    log_debug(f"update_download: {filename} 所有更新源都失败或超时")
     return False
 
 
@@ -443,7 +576,8 @@ def start_openvpn(config_path):
 def start_v2ray(config_path):
     """启动 V2Ray/Xray"""
     try:
-        # 【增强】启动前检查 geo 文件 (优先使用预打包文件)
+        # 【增强】启动前检查 geo 文件 (优先使用预打包文件,带超时控制)
+        print("检查 geo 数据文件...", file=sys.stderr)
         geo_ok, geo_error = check_and_prepare_geo_files()
         if not geo_ok:
             print(f"警告: geo 文件检查失败", file=sys.stderr)
@@ -451,14 +585,14 @@ def start_v2ray(config_path):
             log_debug(f"start_v2ray: geo 文件检查失败 - {geo_error}")
             # 不阻止启动,但用户可能会遇到问题
 
-        # 【新增】启动后台线程检查 geo 文件更新
+        # 【新增】启动后台线程检查 geo 文件更新 (带超时控制)
         update_thread = threading.Thread(
             target=check_geo_updates_async,
             daemon=True,
             name="geo-update-checker"
         )
         update_thread.start()
-        log_debug("start_v2ray: 已启动 geo 文件更新检查线程")
+        log_debug("start_v2ray: 已启动 geo 文件更新检查线程 (带超时控制)")
 
         # 检查 systemd 服务是否在运行
         log_debug("检查 v2ray.service 状态...")

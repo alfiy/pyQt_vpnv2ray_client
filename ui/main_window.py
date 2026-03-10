@@ -1,6 +1,7 @@
 """
 主窗口界面
 集成 Polkit 权限提升功能 + TProxy 透明代理配置 + SS URL 导入
+增强功能:自动从配置中提取 VPS IP 和 TProxy 端口,并自动启用透明代理
 """
 import os
 import sys
@@ -8,6 +9,7 @@ import time
 import subprocess
 from PyQt5.QtGui import QIcon
 import re
+import json
 from PyQt5.QtWidgets import (
     QMainWindow, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QWidget,
     QProgressBar, QFileDialog, QMessageBox, QCheckBox, QLineEdit,
@@ -22,13 +24,13 @@ from core.ss_config_manager import (
 )
 from core.polkit_helper import PolkitHelper
 
-# 获取程序根目录（兼容开发和安装环境）
+# 获取程序根目录(兼容开发和安装环境)
 def get_app_root():
     """获取程序根目录"""
-    # 如果是打包后的程序，使用可执行文件所在目录
+    # 如果是打包后的程序,使用可执行文件所在目录
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
-    # 开发环境：使用 main.py 所在目录的父目录（因为 main_window.py 在 ui/ 下）
+    # 开发环境:使用 main.py 所在目录的父目录(因为 main_window.py 在 ui/ 下)
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # TProxy 配置持久化文件路径
@@ -84,6 +86,80 @@ def save_tproxy_config(enabled, vps_ip, port, mark, table):
             f.write(f"TABLE={table}\n")
     except Exception as e:
         print(f"保存 tproxy 配置失败: {e}")
+
+
+def extract_tproxy_config_from_v2ray(config_path):
+    """
+    从 V2Ray 配置文件中自动提取 TProxy 相关参数
+    
+    Returns:
+        dict: {
+            'vps_ip': str,      # 服务器 IP 地址
+            'tproxy_port': int  # TProxy 入站端口
+        }
+        如果提取失败,返回 None
+    """
+    if not os.path.exists(config_path):
+        return None
+    
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        vps_ip = None
+        tproxy_port = None
+        
+        # 1. 提取服务器 IP 地址
+        # 从 outbounds 中查找服务器地址
+        outbounds = config.get('outbounds', [])
+        for outbound in outbounds:
+            # 查找 Shadowsocks 或其他代理协议的服务器
+            if outbound.get('protocol') in ['shadowsocks', 'vmess', 'vless', 'trojan', 'socks', 'http']:
+                settings = outbound.get('settings', {})
+                servers = settings.get('servers', [])
+                if servers and len(servers) > 0:
+                    server = servers[0]
+                    address = server.get('address', '')
+                    # 验证是否为有效 IP 地址(排除域名)
+                    if address and re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', address):
+                        vps_ip = address
+                        break
+        
+        # 2. 提取 TProxy 入站端口
+        # 从 inbounds 中查找 dokodemo-door 或 tproxy 类型的入站
+        inbounds = config.get('inbounds', [])
+        for inbound in inbounds:
+            protocol = inbound.get('protocol', '')
+            # 查找 dokodemo-door 协议(常用于透明代理)
+            if protocol == 'dokodemo-door':
+                port = inbound.get('port')
+                settings = inbound.get('settings', {})
+                # 确认配置了透明代理相关设置
+                if settings.get('network') in ['tcp,udp', 'tcp', 'udp']:
+                    tproxy_port = port
+                    break
+            # 也支持直接标记为 tproxy 的入站
+            elif 'tproxy' in inbound.get('tag', '').lower():
+                tproxy_port = inbound.get('port')
+                break
+        
+        # 如果都提取成功,返回配置
+        if vps_ip and tproxy_port:
+            print(f"✓ 自动提取配置成功: VPS IP={vps_ip}, TProxy端口={tproxy_port}")
+            return {
+                'vps_ip': vps_ip,
+                'tproxy_port': tproxy_port
+            }
+        else:
+            print(f"⚠ 配置提取不完整: VPS IP={vps_ip}, TProxy端口={tproxy_port}")
+            return None
+            
+    except json.JSONDecodeError as e:
+        print(f"✗ JSON 解析失败: {e}")
+        return None
+    except Exception as e:
+        print(f"✗ 提取配置失败: {e}")
+        return None
 
 
 class MainWindow(QMainWindow):
@@ -229,7 +305,7 @@ class MainWindow(QMainWindow):
                 background-color: #cccccc;
             }
         """)
-        self.restart_v2ray_button.setToolTip("重启 V2Ray 进程以应用新配置（保持 VPN 连接）")
+        self.restart_v2ray_button.setToolTip("重启 V2Ray 进程以应用新配置(保持 VPN 连接)")
         self.restart_v2ray_button.setEnabled(False)
         self.restart_v2ray_button.clicked.connect(self.restart_v2ray_only)
         ss_layout.addWidget(self.restart_v2ray_button)
@@ -259,22 +335,26 @@ class MainWindow(QMainWindow):
         tproxy_layout = QFormLayout()
 
         # 启用复选框
-        self.tproxy_checkbox = QCheckBox("启用透明代理")
+        self.tproxy_checkbox = QCheckBox("启用透明代理(从配置自动获取参数)")
         self.tproxy_checkbox.setChecked(tproxy_conf["enabled"])
         self.tproxy_checkbox.setToolTip("启用后,启动 VPN + V2Ray 时将自动配置 iptables tproxy 规则")
         tproxy_layout.addRow(self.tproxy_checkbox)
 
-        # VPS IP
+        # VPS IP (只读)
         self.vps_ip_input = QLineEdit(tproxy_conf["vps_ip"])
-        self.vps_ip_input.setPlaceholderText("例如: 1.2.3.4")
-        self.vps_ip_input.setToolTip("VPS 服务器 IP,此 IP 的流量将被排除,防止代理循环")
+        self.vps_ip_input.setPlaceholderText("将从 V2Ray 配置自动提取")
+        self.vps_ip_input.setReadOnly(True)  # 设置为只读
+        self.vps_ip_input.setStyleSheet("QLineEdit { background-color: #f5f5f5; color: #666; }")
+        self.vps_ip_input.setToolTip("VPS 服务器 IP (从配置自动提取,不可编辑)")
         tproxy_layout.addRow("VPS IP:", self.vps_ip_input)
 
-        # TProxy 端口
+        # TProxy 端口 (只读)
         self.tproxy_port_input = QSpinBox()
         self.tproxy_port_input.setRange(1, 65535)
         self.tproxy_port_input.setValue(tproxy_conf["port"])
-        self.tproxy_port_input.setToolTip("V2Ray/Xray 的 tproxy 入站监听端口 (需与 V2Ray 配置一致)")
+        self.tproxy_port_input.setReadOnly(True)  # 设置为只读
+        self.tproxy_port_input.setStyleSheet("QSpinBox { background-color: #f5f5f5; color: #666; }")
+        self.tproxy_port_input.setToolTip("V2Ray/Xray 的 tproxy 入站监听端口 (从配置自动提取,不可编辑)")
         tproxy_layout.addRow("TProxy 端口:", self.tproxy_port_input)
 
         # fwmark
@@ -319,12 +399,12 @@ class MainWindow(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
-        # 使用用户主目录作为默认配置路径，避免权限问题
+        # 使用用户主目录作为默认配置路径,避免权限问题
         user_home = os.path.expanduser("~")
         self.vpn_config_path = os.path.join(user_home, ".config", "ov2n", "client.ovpn")
         self.v2ray_config_path = os.path.join(user_home, ".config", "ov2n", "config.json")
 
-        # 如果用户目录下没有，尝试使用程序目录（开发环境）
+        # 如果用户目录下没有,尝试使用程序目录(开发环境)
         app_root = get_app_root()
         dev_vpn_path = os.path.join(app_root, "core", "openvpn", "client.ovpn")
         dev_v2ray_path = os.path.join(app_root, "core", "xray", "config.json")
@@ -333,7 +413,7 @@ class MainWindow(QMainWindow):
         user_config_dir = os.path.dirname(self.v2ray_config_path)
         os.makedirs(user_config_dir, exist_ok=True)
 
-        # 如果用户目录没有配置，但开发目录有，则复制一份
+        # 如果用户目录没有配置,但开发目录有,则复制一份
         if not os.path.exists(self.v2ray_config_path) and os.path.exists(dev_v2ray_path):
             import shutil
             try:
@@ -344,6 +424,9 @@ class MainWindow(QMainWindow):
 
         # 更新显示
         self._update_config_display()
+        
+        # 初始加载时尝试自动提取配置
+        self._auto_extract_tproxy_config()
 
         # 绑定按钮事件
         self.start_button.clicked.connect(self.start_worker)
@@ -365,6 +448,40 @@ class MainWindow(QMainWindow):
             self.update_ss_server_display()
         else:
             self.v2ray_path_label.setText("V2Ray 配置: 未选择")
+
+    def _auto_extract_tproxy_config(self):
+        """
+        自动从 V2Ray 配置中提取 TProxy 参数
+        如果提取成功,自动启用透明代理并填充参数
+        """
+        if not os.path.exists(self.v2ray_config_path):
+            return
+        
+        extracted = extract_tproxy_config_from_v2ray(self.v2ray_config_path)
+        
+        if extracted:
+            # 自动启用透明代理
+            self.tproxy_checkbox.setChecked(True)
+            
+            # 填充提取的参数
+            self.vps_ip_input.setText(extracted['vps_ip'])
+            self.tproxy_port_input.setValue(extracted['tproxy_port'])
+            
+            # 更新状态提示
+            self.label.setText(f"✓ 已自动配置透明代理: {extracted['vps_ip']}:{extracted['tproxy_port']}")
+            
+            # 保存配置
+            save_tproxy_config(
+                True,
+                extracted['vps_ip'],
+                extracted['tproxy_port'],
+                self.mark_input.value(),
+                self.table_input.value()
+            )
+            
+            print(f"✓ 透明代理已自动配置: VPS={extracted['vps_ip']}, 端口={extracted['tproxy_port']}")
+        else:
+            print("⚠ 无法从配置中提取完整的 TProxy 参数")
 
     # ------------------- SS 配置相关方法 -------------------
     
@@ -422,12 +539,15 @@ class MainWindow(QMainWindow):
             self.update_ss_server_display()
             self.v2ray_path_label.setText(f"V2Ray 配置: {os.path.basename(self.v2ray_config_path)} (已修改)")
             
-            # 如果 V2Ray 正在运行，提示用户重启
+            # 【新增】导入成功后自动提取 TProxy 配置
+            self._auto_extract_tproxy_config()
+            
+            # 如果 V2Ray 正在运行,提示用户重启
             if self.worker and self.worker.isRunning():
                 reply = QMessageBox.question(
                     self,
                     "重启 V2Ray",
-                    "配置已更新。是否立即重启 V2Ray 以应用新配置？\n\n"
+                    "配置已更新,透明代理参数已自动提取。\n是否立即重启 V2Ray 以应用新配置?\n\n"
                     "VPN 连接将保持不断开。",
                     QMessageBox.Yes | QMessageBox.No,
                     QMessageBox.Yes
@@ -438,7 +558,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(
                     self,
                     "提示",
-                    "配置已保存。下次启动 VPN 时将使用新配置。"
+                    "配置已保存,透明代理参数已自动提取。\n下次启动 VPN 时将使用新配置。"
                 )
 
     def edit_v2ray_config(self):
@@ -459,11 +579,20 @@ class MainWindow(QMainWindow):
         # 使用 xdg-open 打开默认编辑器
         try:
             subprocess.Popen(["xdg-open", self.v2ray_config_path])
+            
+            # 提示用户编辑后重新加载
+            QMessageBox.information(
+                self,
+                "提示",
+                "配置文件已在外部编辑器中打开。\n\n"
+                "编辑完成并保存后,请点击「选择 V2Ray 配置」按钮\n"
+                "重新加载配置,以更新透明代理参数。"
+            )
         except Exception as e:
             QMessageBox.critical(self, "错误", f"无法打开编辑器: {e}")
 
     def restart_v2ray_only(self):
-        """仅重启 V2Ray 进程（保持 OpenVPN 连接）"""
+        """仅重启 V2Ray 进程(保持 OpenVPN 连接)"""
         if not self.worker or not self.worker.isRunning():
             QMessageBox.warning(self, "警告", "VPN 连接未运行")
             return
@@ -480,7 +609,7 @@ class MainWindow(QMainWindow):
             return
         
         try:
-            # 停止旧 V2Ray（只停止 V2Ray，保留 OpenVPN）            
+            # 停止旧 V2Ray(只停止 V2Ray,保留 OpenVPN)            
             
             # 使用 pkexec 停止 V2Ray
             cmd = [
@@ -493,15 +622,13 @@ class MainWindow(QMainWindow):
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             if result.returncode != 0:
-                # 停止失败，但可能进程已经不存在了
+                # 停止失败,但可能进程已经不存在了
                 print(f"停止 V2Ray 警告: {result.stderr}")
             
             # 等待进程完全停止
             time.sleep(2)
             
             # 启动新 V2Ray
-            # 使用 vpn-helper 的 start-v2ray-only 命令（需要先在 vpn-helper.py 中添加）
-            # 临时方案：直接启动
             self.update_label("正在启动新的 V2Ray 进程...")
             
             # 查找 xray/v2ray 二进制
@@ -546,10 +673,10 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(
                     self,
                     "重启成功",
-                    f"V2Ray 已成功重启！\n新进程 PID: {process.pid}"
+                    f"V2Ray 已成功重启!\n新进程 PID: {process.pid}"
                 )
             except ProcessLookupError:
-                # 进程已退出，检查日志
+                # 进程已退出,检查日志
                 try:
                     with open("/tmp/v2ray-restart.log", "r") as f:
                         log_content = f.read(500)
@@ -559,7 +686,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(
                     self,
                     "重启失败",
-                    f"V2Ray 启动失败，进程已退出。\n\n日志内容:\n{log_content}"
+                    f"V2Ray 启动失败,进程已退出。\n\n日志内容:\n{log_content}"
                 )
                 self.update_label("❌ V2Ray 重启失败")
                 
@@ -572,8 +699,8 @@ class MainWindow(QMainWindow):
     # ------------------- TProxy 辅助 -------------------
     def _toggle_tproxy_inputs(self, enabled):
         """根据复选框状态启用/禁用 tproxy 输入控件"""
-        self.vps_ip_input.setEnabled(enabled)
-        self.tproxy_port_input.setEnabled(enabled)
+        # VPS IP 和 TProxy 端口始终只读,不受启用状态影响
+        # 只有 mark 和 table 可编辑
         self.mark_input.setEnabled(enabled)
         self.table_input.setEnabled(enabled)
 
@@ -615,6 +742,9 @@ class MainWindow(QMainWindow):
             self.v2ray_path_label.setText(f"V2Ray 配置: {os.path.basename(path)}")
             self.label.setText(f"已选择 V2Ray 配置: {os.path.basename(path)}")
             self.update_ss_server_display()
+            
+            # 【新增】选择配置后自动提取 TProxy 参数
+            self._auto_extract_tproxy_config()
 
     # ------------------- 启动/停止 Worker -------------------
     def start_worker(self):
@@ -648,14 +778,16 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(
                     self,
                     "错误",
-                    "启用透明代理时必须填写 VPS IP 地址。"
+                    "启用透明代理时必须配置 VPS IP 地址。\n\n"
+                    "请确保 V2Ray 配置文件包含有效的服务器 IP 地址。"
                 )
                 return
             if not self._validate_ip(tproxy_vps_ip):
                 QMessageBox.critical(
                     self,
                     "错误",
-                    f"VPS IP 地址格式不正确: {tproxy_vps_ip}\n\n请输入有效的 IPv4 地址,例如: 1.2.3.4"
+                    f"VPS IP 地址格式不正确: {tproxy_vps_ip}\n\n"
+                    "请检查 V2Ray 配置文件中的服务器地址。"
                 )
                 return
 
