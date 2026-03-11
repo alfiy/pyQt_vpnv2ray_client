@@ -254,7 +254,19 @@ class MainWindow(QMainWindow):
         # 进度条
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
-        self.progress_bar.setStyleSheet("QProgressBar { height: 25px; }")
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                height: 25px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                text-align: center;
+                background-color: #f0f0f0;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+                border-radius: 3px;
+            }
+        """)
 
         # 配置文件路径显示
         self.vpn_path_label = QLabel("OpenVPN 配置: 未选择")
@@ -265,10 +277,42 @@ class MainWindow(QMainWindow):
 
         # 按钮
         self.select_vpn_button = QPushButton("📁 选择 OpenVPN 配置")
-        self.select_vpn_button.setStyleSheet("padding: 10px; font-size: 13px;")
+        self.select_vpn_button.setStyleSheet("""
+            QPushButton {
+                padding: 10px;
+                font-size: 13px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                background-color: white;
+                outline: none;
+            }
+            QPushButton:hover {
+                background-color: #f5f5f5;
+            }
+            QPushButton:focus {
+                outline: none;
+                border: 1px solid #2196F3;
+            }
+        """)
         
         self.select_v2ray_button = QPushButton("📁 选择 V2Ray 配置")
-        self.select_v2ray_button.setStyleSheet("padding: 10px; font-size: 13px;")
+        self.select_v2ray_button.setStyleSheet("""
+            QPushButton {
+                padding: 10px;
+                font-size: 13px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                background-color: white;
+                outline: none;
+            }
+            QPushButton:hover {
+                background-color: #f5f5f5;
+            }
+            QPushButton:focus {
+                outline: none;
+                border: 1px solid #2196F3;
+            }
+        """)
         
         self.start_button = QPushButton("🚀 启动 VPN + V2Ray")
         self.start_button.setStyleSheet("""
@@ -279,12 +323,18 @@ class MainWindow(QMainWindow):
                 font-size: 14px;
                 font-weight: bold;
                 border-radius: 5px;
+                border: none;
+                outline: none;
             }
             QPushButton:hover {
                 background-color: #45a049;
             }
             QPushButton:disabled {
                 background-color: #cccccc;
+                color: #666666;
+            }
+            QPushButton:focus {
+                outline: none;
             }
         """)
         
@@ -297,12 +347,18 @@ class MainWindow(QMainWindow):
                 font-size: 14px;
                 font-weight: bold;
                 border-radius: 5px;
+                border: none;
+                outline: none;
             }
             QPushButton:hover {
                 background-color: #da190b;
             }
             QPushButton:disabled {
                 background-color: #cccccc;
+                color: #666666;
+            }
+            QPushButton:focus {
+                outline: none;
             }
         """)
         self.stop_button.setEnabled(False)
@@ -343,16 +399,37 @@ class MainWindow(QMainWindow):
                 padding: 8px;
                 font-size: 12px;
                 border-radius: 4px;
+                border: none;
+                outline: none;
             }
             QPushButton:hover {
                 background-color: #1976D2;
+            }
+            QPushButton:focus {
+                outline: none;
             }
         """)
         self.import_ss_button.setToolTip("从剪贴板导入 ss:// 链接并更新 V2Ray 配置")
         self.import_ss_button.clicked.connect(self.import_ss_from_clipboard)
         
         self.edit_ss_button = QPushButton("✏️ 手动编辑配置")
-        self.edit_ss_button.setStyleSheet("padding: 8px; font-size: 12px;")
+        self.edit_ss_button.setStyleSheet("""
+            QPushButton {
+                padding: 8px;
+                font-size: 12px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                background-color: white;
+                outline: none;
+            }
+            QPushButton:hover {
+                background-color: #f5f5f5;
+            }
+            QPushButton:focus {
+                outline: none;
+                border: 1px solid #2196F3;
+            }
+        """)
         self.edit_ss_button.setToolTip("手动编辑 V2Ray 配置文件")
         self.edit_ss_button.clicked.connect(self.edit_v2ray_config)
         
@@ -369,12 +446,18 @@ class MainWindow(QMainWindow):
                 padding: 8px;
                 font-size: 12px;
                 border-radius: 4px;
+                border: none;
+                outline: none;
             }
             QPushButton:hover {
                 background-color: #F57C00;
             }
             QPushButton:disabled {
                 background-color: #cccccc;
+                color: #666666;
+            }
+            QPushButton:focus {
+                outline: none;
             }
         """)
         self.restart_v2ray_button.setToolTip("重启 V2Ray 进程以应用新配置(保持 VPN 连接)")
@@ -425,7 +508,16 @@ class MainWindow(QMainWindow):
         self.tproxy_port_input.setRange(1, 65535)
         self.tproxy_port_input.setValue(tproxy_conf["port"])
         self.tproxy_port_input.setReadOnly(True)  # 设置为只读
-        self.tproxy_port_input.setStyleSheet("QSpinBox { background-color: #f5f5f5; color: #666; }")
+        self.tproxy_port_input.setButtonSymbols(QSpinBox.NoButtons)  # 隐藏上下箭头
+        self.tproxy_port_input.setStyleSheet("""
+            QSpinBox {
+                background-color: #f5f5f5;
+                color: #666;
+                border: 1px solid #ddd;
+                border-radius: 3px;
+                padding: 4px;
+            }
+        """)
         self.tproxy_port_input.setToolTip("V2Ray/Xray 的 tproxy 入站监听端口 (从配置自动提取,不可编辑)")
         tproxy_layout.addRow("TProxy 端口:", self.tproxy_port_input)
 
@@ -433,6 +525,14 @@ class MainWindow(QMainWindow):
         self.mark_input = QSpinBox()
         self.mark_input.setRange(1, 255)
         self.mark_input.setValue(tproxy_conf["mark"])
+        self.mark_input.setButtonSymbols(QSpinBox.NoButtons)  # 隐藏上下箭头
+        self.mark_input.setStyleSheet("""
+            QSpinBox {
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                padding: 4px;
+            }
+        """)
         self.mark_input.setToolTip("iptables fwmark 标记值 (默认 1)")
         tproxy_layout.addRow("fwmark:", self.mark_input)
 
@@ -440,6 +540,14 @@ class MainWindow(QMainWindow):
         self.table_input = QSpinBox()
         self.table_input.setRange(1, 252)
         self.table_input.setValue(tproxy_conf["table"])
+        self.table_input.setButtonSymbols(QSpinBox.NoButtons)  # 隐藏上下箭头
+        self.table_input.setStyleSheet("""
+            QSpinBox {
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                padding: 4px;
+            }
+        """)
         self.table_input.setToolTip("策略路由表编号 (默认 100)")
         tproxy_layout.addRow("路由表:", self.table_input)
 
@@ -488,22 +596,47 @@ class MainWindow(QMainWindow):
         user_config_dir = os.path.dirname(self.v2ray_config_path)
         os.makedirs(user_config_dir, exist_ok=True)
 
-        # 如果用户目录没有配置,但开发目录有,则复制一份
-        if not os.path.exists(self.v2ray_config_path) and os.path.exists(dev_v2ray_path):
-            import shutil
-            try:
-                shutil.copy2(dev_v2ray_path, self.v2ray_config_path)
-                print(f"已复制默认 V2Ray 配置: {dev_v2ray_path} -> {self.v2ray_config_path}")
-            except Exception as e:
-                print(f"复制默认 V2Ray 配置失败: {e}")
+        # V2Ray 配置处理 (优先级: 已存在 > 开发目录 > 创建默认)
+        if not os.path.exists(self.v2ray_config_path):
+            print(f"V2Ray 配置不存在: {self.v2ray_config_path}")
+            
+            # 尝试从开发目录复制
+            if os.path.exists(dev_v2ray_path):
+                import shutil
+                try:
+                    shutil.copy2(dev_v2ray_path, self.v2ray_config_path)
+                    print(f"✓ 已从开发目录复制 V2Ray 配置")
+                except Exception as e:
+                    print(f"复制失败: {e}")
+                    # 创建默认配置
+                    self._create_default_v2ray_config()
+            else:
+                # 创建默认配置
+                self._create_default_v2ray_config()
+        else:
+            # 配置存在,验证其有效性
+            if not self._validate_v2ray_config(self.v2ray_config_path):
+                print(f"⚠️ V2Ray 配置文件损坏或格式错误,将重新创建")
+                # 备份损坏的配置
+                try:
+                    import shutil
+                    backup_path = self.v2ray_config_path + ".backup"
+                    shutil.copy2(self.v2ray_config_path, backup_path)
+                    print(f"已备份损坏的配置到: {backup_path}")
+                except Exception as e:
+                    print(f"备份失败: {e}")
+                
+                # 创建新的默认配置
+                self._create_default_v2ray_config()
         
+        # OpenVPN 配置处理
         if not os.path.exists(self.vpn_config_path) and os.path.exists(dev_vpn_path):
             import shutil
             try:
                 shutil.copy2(dev_vpn_path, self.vpn_config_path)
-                print(f"已复制默认 OpenVPN 配置: {dev_vpn_path} -> {self.vpn_config_path}")
+                print(f"✓ 已从开发目录复制 OpenVPN 配置")
             except Exception as e:
-                print(f"复制默认 OpenVPN 配置失败: {e}")
+                print(f"复制 OpenVPN 配置失败: {e}")
 
         # 更新显示
         self._update_config_display()
@@ -518,6 +651,166 @@ class MainWindow(QMainWindow):
         self.select_v2ray_button.clicked.connect(self.select_v2ray_config)
 
         self.worker = None
+    
+    def _validate_v2ray_config(self, config_path):
+        """
+        验证 V2Ray 配置文件是否有效
+        
+        Args:
+            config_path: 配置文件路径
+        
+        Returns:
+            bool: 配置是否有效
+        """
+        try:
+            # 检查文件大小
+            size = os.path.getsize(config_path)
+            if size == 0:
+                print(f"V2Ray 配置文件为空")
+                return False
+            
+            # 尝试解析 JSON
+            with open(config_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                
+                # 检查是否为空或只有空白字符
+                if not content.strip():
+                    print(f"V2Ray 配置文件内容为空")
+                    return False
+                
+                # 解析 JSON
+                config = json.loads(content)
+                
+                # 检查基本结构
+                if 'inbounds' not in config:
+                    print(f"V2Ray 配置缺少 inbounds")
+                    return False
+                
+                if 'outbounds' not in config:
+                    print(f"V2Ray 配置缺少 outbounds")
+                    return False
+                
+                # 基本验证通过
+                print(f"✓ V2Ray 配置验证通过")
+                return True
+                
+        except json.JSONDecodeError as e:
+            print(f"V2Ray 配置 JSON 格式错误: {e}")
+            return False
+        except Exception as e:
+            print(f"验证 V2Ray 配置失败: {e}")
+            return False
+    
+    def _create_default_v2ray_config(self):
+        """创建默认的 V2Ray 配置文件"""
+        print(f"正在创建默认 V2Ray 配置...")
+        
+        default_config = {
+            "log": {
+                "loglevel": "warning"
+            },
+            "inbounds": [
+                {
+                    "tag": "socks",
+                    "port": 1080,
+                    "protocol": "socks",
+                    "settings": {
+                        "auth": "noauth",
+                        "udp": True
+                    }
+                },
+                {
+                    "tag": "http",
+                    "port": 1081,
+                    "protocol": "http"
+                },
+                {
+                    "tag": "tproxy",
+                    "port": 12345,
+                    "protocol": "dokodemo-door",
+                    "settings": {
+                        "network": "tcp,udp",
+                        "followRedirect": True
+                    },
+                    "streamSettings": {
+                        "sockopt": {
+                            "tproxy": "tproxy"
+                        }
+                    }
+                }
+            ],
+            "outbounds": [
+                {
+                    "tag": "proxy",
+                    "protocol": "shadowsocks",
+                    "settings": {
+                        "servers": [
+                            {
+                                "address": "your.server.com",
+                                "port": 8388,
+                                "method": "chacha20-ietf-poly1305",
+                                "password": "your_password_here"
+                            }
+                        ]
+                    }
+                },
+                {
+                    "tag": "direct",
+                    "protocol": "freedom",
+                    "settings": {}
+                },
+                {
+                    "tag": "block",
+                    "protocol": "blackhole",
+                    "settings": {
+                        "response": {
+                            "type": "http"
+                        }
+                    }
+                }
+            ],
+            "routing": {
+                "domainStrategy": "IPOnDemand",
+                "rules": [
+                    {
+                        "type": "field",
+                        "ip": [
+                            "geoip:private"
+                        ],
+                        "outboundTag": "direct"
+                    },
+                    {
+                        "type": "field",
+                        "domain": [
+                            "geosite:cn"
+                        ],
+                        "outboundTag": "direct"
+                    },
+                    {
+                        "type": "field",
+                        "ip": [
+                            "geoip:cn"
+                        ],
+                        "outboundTag": "direct"
+                    }
+                ]
+            }
+        }
+        
+        try:
+            with open(self.v2ray_config_path, 'w', encoding='utf-8') as f:
+                json.dump(default_config, f, indent=2, ensure_ascii=False)
+            
+            print(f"✓ 默认 V2Ray 配置已创建")
+            print(f"⚠️  请使用「从剪贴板导入 SS 链接」或手动编辑配置!")
+            
+        except Exception as e:
+            print(f"创建默认 V2Ray 配置失败: {e}")
+            QMessageBox.critical(
+                self,
+                "配置错误",
+                f"无法创建 V2Ray 配置文件:\n{e}\n\n请手动创建配置文件。"
+            )
 
     def _update_config_display(self):
         """更新配置文件路径显示"""
