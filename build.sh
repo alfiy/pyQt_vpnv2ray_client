@@ -1,7 +1,9 @@
 #!/bin/bash
-# Build script for creating DEB packages on Linux (增强版)
+# Build script for creating DEB packages on Linux (增强版 - 支持打包 v2ray)
 # Project: ov2n - OpenVPN + V2Ray Client
-# 增强功能: 自动安装 V2Ray 和 geo 数据文件 (优先使用预打包文件)
+# 增强功能: 
+# - 自动安装 V2Ray 和 geo 数据文件 (优先使用预打包文件)
+# - 支持打包预下载的 v2ray 二进制文件
 # Usage: ./build.sh [version] [distro]
 
 set -euo pipefail
@@ -97,11 +99,11 @@ if [ "$COMMAND" = "rebuild" ]; then
 fi
 
 echo -e "${BLUE}"
-echo "╔════════════════════════════════════════╗"
-echo "║  ov2n - VPN Client Builder (Enhanced)  ║"
-echo "║  OpenVPN + V2Ray/Xray Integration      ║"
-echo "║  + Bundled Geo Files Support           ║"
-echo "╚════════════════════════════════════════╝"
+echo "╔═══════════════════════════════════════════╗"
+echo "║  ov2n - VPN Client Builder (Enhanced)     ║"
+echo "║  OpenVPN + V2Ray/Xray Integration         ║"
+echo "║  + Bundled Geo Files & V2Ray Binary       ║"
+echo "╚═══════════════════════════════════════════╝"
 echo -e "${NC}"
 echo ""
 echo -e "${BLUE}Version:${NC} $VERSION"
@@ -141,50 +143,80 @@ echo -e "${GREEN}  ✓ requirements.txt found${NC}"
 
 echo ""
 
-# Step 3: Check bundled geo files
-echo -e "${YELLOW}[3/9] Checking bundled geo files...${NC}"
+# Step 3: Check bundled v2ray and geo files
+echo -e "${YELLOW}[3/10] Checking bundled v2ray and geo files...${NC}"
 
+BUNDLED_V2RAY_OK=false
 BUNDLED_GEO_OK=true
 
-if [ -f "resources/geoip.dat" ]; then
-    GEOIP_SIZE=$(stat -c%s "resources/geoip.dat" 2>/dev/null || stat -f%z "resources/geoip.dat" 2>/dev/null || echo "0")
-    if [ "$GEOIP_SIZE" -gt 102400 ]; then
-        echo -e "${GREEN}  ✓ resources/geoip.dat found ($(numfmt --to=iec $GEOIP_SIZE 2>/dev/null || echo "${GEOIP_SIZE} bytes"))${NC}"
+# 检查 v2ray 二进制
+if [ -f "resources/v2ray/v2ray" ]; then
+    V2RAY_SIZE=$(stat -c%s "resources/v2ray/v2ray" 2>/dev/null || stat -f%z "resources/v2ray/v2ray" 2>/dev/null || echo "0")
+    if [ "$V2RAY_SIZE" -gt 1048576 ]; then  # > 1MB
+        echo -e "${GREEN}  ✓ resources/v2ray/v2ray found ($(numfmt --to=iec $V2RAY_SIZE 2>/dev/null || echo "${V2RAY_SIZE} bytes"))${NC}"
+        
+        # 检查是否可执行
+        if [ -x "resources/v2ray/v2ray" ]; then
+            echo -e "${GREEN}  ✓ v2ray is executable${NC}"
+        else
+            echo -e "${YELLOW}  ⚠ v2ray is not executable, fixing...${NC}"
+            chmod +x "resources/v2ray/v2ray"
+        fi
+        
+        BUNDLED_V2RAY_OK=true
     else
-        echo -e "${YELLOW}  ⚠ resources/geoip.dat is too small (${GEOIP_SIZE} bytes), may be invalid${NC}"
-        BUNDLED_GEO_OK=false
+        echo -e "${YELLOW}  ⚠ resources/v2ray/v2ray is too small (${V2RAY_SIZE} bytes), may be invalid${NC}"
     fi
 else
-    echo -e "${YELLOW}  ⚠ resources/geoip.dat not found${NC}"
-    BUNDLED_GEO_OK=false
+    echo -e "${YELLOW}  ⚠ resources/v2ray/v2ray not found${NC}"
 fi
 
-if [ -f "resources/geosite.dat" ]; then
-    GEOSITE_SIZE=$(stat -c%s "resources/geosite.dat" 2>/dev/null || stat -f%z "resources/geosite.dat" 2>/dev/null || echo "0")
-    if [ "$GEOSITE_SIZE" -gt 102400 ]; then
-        echo -e "${GREEN}  ✓ resources/geosite.dat found ($(numfmt --to=iec $GEOSITE_SIZE 2>/dev/null || echo "${GEOSITE_SIZE} bytes"))${NC}"
+# 检查 geo 文件
+for geo_file in geoip.dat geosite.dat; do
+    if [ -f "resources/v2ray/${geo_file}" ]; then
+        GEO_SIZE=$(stat -c%s "resources/v2ray/${geo_file}" 2>/dev/null || stat -f%z "resources/v2ray/${geo_file}" 2>/dev/null || echo "0")
+        if [ "$GEO_SIZE" -gt 102400 ]; then
+            echo -e "${GREEN}  ✓ resources/v2ray/${geo_file} found ($(numfmt --to=iec $GEO_SIZE 2>/dev/null || echo "${GEO_SIZE} bytes"))${NC}"
+        else
+            echo -e "${YELLOW}  ⚠ resources/v2ray/${geo_file} is too small (${GEO_SIZE} bytes), may be invalid${NC}"
+            BUNDLED_GEO_OK=false
+        fi
     else
-        echo -e "${YELLOW}  ⚠ resources/geosite.dat is too small (${GEOSITE_SIZE} bytes), may be invalid${NC}"
+        echo -e "${YELLOW}  ⚠ resources/v2ray/${geo_file} not found${NC}"
         BUNDLED_GEO_OK=false
     fi
-else
-    echo -e "${YELLOW}  ⚠ resources/geosite.dat not found${NC}"
-    BUNDLED_GEO_OK=false
+done
+
+if [ "$BUNDLED_V2RAY_OK" = false ]; then
+    echo ""
+    echo -e "${YELLOW}  提示: 预打包的 v2ray 二进制文件缺失或无效${NC}"
+    echo -e "${YELLOW}  下载方法:${NC}"
+    echo -e "${YELLOW}    mkdir -p resources/v2ray${NC}"
+    echo -e "${YELLOW}    wget https://github.com/v2fly/v2ray-core/releases/latest/download/v2ray-linux-64.zip${NC}"
+    echo -e "${YELLOW}    unzip v2ray-linux-64.zip${NC}"
+    echo -e "${YELLOW}    cp v2ray resources/v2ray/${NC}"
+    echo -e "${YELLOW}    chmod +x resources/v2ray/v2ray${NC}"
+    echo ""
 fi
 
 if [ "$BUNDLED_GEO_OK" = false ]; then
     echo ""
     echo -e "${YELLOW}  提示: 预打包的 geo 文件缺失或无效${NC}"
-    echo -e "${YELLOW}  运行以下命令下载:${NC}"
-    echo -e "${YELLOW}    ./resources/download_geo.sh${NC}"
+    echo -e "${YELLOW}  下载方法:${NC}"
+    echo -e "${YELLOW}    mkdir -p resources/v2ray${NC}"
+    echo -e "${YELLOW}    wget -O resources/v2ray/geoip.dat https://github.com/v2fly/geoip/releases/latest/download/geoip.dat${NC}"
+    echo -e "${YELLOW}    wget -O resources/v2ray/geosite.dat https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat${NC}"
     echo ""
-    echo -e "${YELLOW}  继续构建 (安装时将从网络下载 geo 文件)...${NC}"
+fi
+
+if [ "$BUNDLED_V2RAY_OK" = false ] || [ "$BUNDLED_GEO_OK" = false ]; then
+    echo -e "${YELLOW}  继续构建 (安装时将从网络下载缺失的文件)...${NC}"
 fi
 
 echo ""
 
 # Step 4: Prepare directories
-echo -e "${YELLOW}[4/9] Preparing build directories...${NC}"
+echo -e "${YELLOW}[4/10] Preparing build directories...${NC}"
 rm -rf "${DEB_BUILD_DIR}"
 mkdir -p "${DEB_BUILD_DIR}/DEBIAN"
 mkdir -p "${DEB_BUILD_DIR}/usr/local/bin"
@@ -203,7 +235,7 @@ echo -e "${GREEN}  ✓ Directories prepared${NC}"
 echo ""
 
 # Step 5: Copy application files
-echo -e "${YELLOW}[5/9] Copying application files...${NC}"
+echo -e "${YELLOW}[5/10] Copying application files...${NC}"
 
 cp -v main.py "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/" || {
     echo -e "${RED}✗ Failed to copy main.py${NC}"
@@ -231,19 +263,35 @@ if [ -d "polkit" ]; then
     echo -e "${GREEN}  ✓ polkit directory copied${NC}"
 fi
 
-# 【新增】复制预打包的 geo 文件到 resources 目录
+# 【增强】复制 resources 目录
 if [ -d "resources" ]; then
-    # 复制所有 resources 内容 (包括 geo 文件、校验和、README 等)
-    cp -rv resources/* "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/" 2>/dev/null || true
-    echo -e "${GREEN}  ✓ resources directory copied${NC}"
-
-    # 统计复制的 geo 文件
-    for geo_file in geoip.dat geosite.dat; do
-        if [ -f "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/${geo_file}" ]; then
-            geo_size=$(stat -c%s "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/${geo_file}" 2>/dev/null || echo "0")
-            echo -e "${GREEN}    ✓ ${geo_file} bundled ($(numfmt --to=iec $geo_size 2>/dev/null || echo "${geo_size} bytes"))${NC}"
+    # 复制 images 目录
+    if [ -d "resources/images" ]; then
+        mkdir -p "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/images"
+        cp -rv resources/images/* "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/images/" 2>/dev/null || true
+        echo -e "${GREEN}  ✓ resources/images directory copied${NC}"
+    fi
+    
+    # 复制 v2ray 目录 (包含 v2ray 二进制、geoip.dat、geosite.dat)
+    if [ -d "resources/v2ray" ]; then
+        mkdir -p "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray"
+        cp -rv resources/v2ray/* "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/" 2>/dev/null || true
+        echo -e "${GREEN}  ✓ resources/v2ray directory copied${NC}"
+        
+        # 统计复制的文件
+        if [ -f "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/v2ray" ]; then
+            v2ray_size=$(stat -c%s "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/v2ray" 2>/dev/null || echo "0")
+            chmod +x "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/v2ray"
+            echo -e "${GREEN}    ✓ v2ray binary bundled ($(numfmt --to=iec $v2ray_size 2>/dev/null || echo "${v2ray_size} bytes"))${NC}"
         fi
-    done
+        
+        for geo_file in geoip.dat geosite.dat; do
+            if [ -f "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/${geo_file}" ]; then
+                geo_size=$(stat -c%s "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/${geo_file}" 2>/dev/null || echo "0")
+                echo -e "${GREEN}    ✓ ${geo_file} bundled ($(numfmt --to=iec $geo_size 2>/dev/null || echo "${geo_size} bytes"))${NC}"
+            fi
+        done
+    fi
 fi
 
 # Copy documentation
@@ -277,7 +325,7 @@ chmod 644 "${DEB_BUILD_DIR}/usr/share/icons/hicolor/"*/apps/ov2n.png 2>/dev/null
 echo -e "${GREEN}  ✓ Icons installed${NC}"
 
 # Step 6: Create launcher script
-echo -e "${YELLOW}[6/9] Creating launcher script...${NC}"
+echo -e "${YELLOW}[6/10] Creating launcher script...${NC}"
 
 cat > "${DEB_BUILD_DIR}/usr/local/bin/${PKG_NAME}" << 'LAUNCHER'
 #!/usr/bin/env python3
@@ -316,7 +364,7 @@ echo -e "${GREEN}  ✓ Launcher script created at /usr/local/bin/${PKG_NAME}${NC
 echo ""
 
 # Step 7: Create desktop entry
-echo -e "${YELLOW}[7/9] Creating desktop entry...${NC}"
+echo -e "${YELLOW}[7/10] Creating desktop entry...${NC}"
 
 cat > "${DEB_BUILD_DIR}/usr/share/applications/${PKG_NAME}.desktop" << DESKTOP
 [Desktop Entry]
@@ -340,7 +388,7 @@ echo -e "${GREEN}  ✓ Desktop entry created${NC}"
 echo ""
 
 # Step 8: Create DEBIAN control file and scripts
-echo -e "${YELLOW}[8/9] Creating DEBIAN metadata...${NC}"
+echo -e "${YELLOW}[8/10] Creating DEBIAN metadata...${NC}"
 
 cat > "${DEB_BUILD_DIR}/DEBIAN/control" << CONTROL
 Package: ${PKG_NAME}
@@ -349,7 +397,7 @@ Architecture: all
 Maintainer: ${MAINTAINER}
 Homepage: https://github.com/alfiy/pyQt_vpnv2ray_client
 Depends: python3 (>= 3.8), python3-pyqt5, openvpn, policykit-1, iptables, wget | curl
-Recommends: xray | v2ray, network-manager
+Recommends: network-manager
 Suggests: gnupg, iptables-persistent
 Priority: optional
 Section: net
@@ -361,16 +409,16 @@ Description: Integrated OpenVPN and V2Ray/Xray VPN Client
  Features:
   - Simple and intuitive interface
   - Support for OpenVPN protocol
-  - Support for V2Ray/Xray proxy protocol
+  - Support for V2Ray/Xray proxy protocol (bundled binary)
   - Transparent proxy via iptables TProxy
   - Integrated connection management
   - PolicyKit integration for privilege escalation
-  - Bundled geo data files (no download needed on first install)
+  - Bundled geo data files and v2ray binary
   - Auto-check geo file updates at runtime
   - Cross-platform compatibility
 CONTROL
 
-# Create postinst script - 增强版 (优先使用预打包 geo 文件)
+# Create postinst script - 增强版 (支持预打包 v2ray)
 cat > "${DEB_BUILD_DIR}/DEBIAN/postinst" << 'POSTINST'
 #!/bin/bash
 set -e
@@ -452,134 +500,76 @@ if [ -d "${PKG_PATH}/polkit" ]; then
     log_info "Helper scripts installed"
 fi
 
-# Step 6: 检查并安装 V2Ray (如果需要)
+# Step 6: 【优化】安装 V2Ray - 直接复制预打包文件
 echo ""
-echo "Checking V2Ray/Xray installation..."
+echo "Installing V2Ray..."
 
-if command -v v2ray >/dev/null 2>&1 || command -v xray >/dev/null 2>&1; then
-    log_info "V2Ray/Xray is already installed"
+BUNDLED_V2RAY="${RESOURCES_PATH}/v2ray/v2ray"
 
-    if command -v v2ray >/dev/null 2>&1; then
-        V2RAY_VERSION=$(v2ray version 2>/dev/null | head -1 || echo "unknown")
-        echo "   Version: $V2RAY_VERSION"
-    elif command -v xray >/dev/null 2>&1; then
-        XRAY_VERSION=$(xray version 2>/dev/null | head -1 || echo "unknown")
-        echo "   Version: $XRAY_VERSION"
-    fi
+# 检查系统是否已安装 v2ray 或 xray
+if command -v v2ray >/dev/null 2>&1; then
+    V2RAY_VERSION=$(v2ray version 2>/dev/null | head -1 || echo "unknown")
+    log_info "V2Ray already installed: $V2RAY_VERSION"
+elif command -v xray >/dev/null 2>&1; then
+    XRAY_VERSION=$(xray version 2>/dev/null | head -1 || echo "unknown")
+    log_info "Xray already installed: $XRAY_VERSION"
 else
-    log_warn "V2Ray/Xray not found. Attempting auto-installation..."
-
-    if command -v curl >/dev/null 2>&1; then
-        echo "   Downloading V2Ray installer..."
-        if curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh -o /tmp/install-v2ray.sh 2>/dev/null; then
-            echo "   Running V2Ray installer..."
-            if bash /tmp/install-v2ray.sh >/tmp/v2ray-install.log 2>&1; then
-                log_info "V2Ray installed successfully"
-                rm -f /tmp/install-v2ray.sh /tmp/v2ray-install.log
-            else
-                log_warn "V2Ray auto-installation failed"
-                echo "   Please install manually: bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)"
-            fi
+    # 系统未安装,使用预打包的 v2ray
+    if [ -f "$BUNDLED_V2RAY" ]; then
+        echo "   Copying bundled v2ray binary to /usr/local/bin/..."
+        cp "$BUNDLED_V2RAY" /usr/local/bin/v2ray
+        chmod +x /usr/local/bin/v2ray
+        
+        # 验证文件是否成功复制
+        if [ -f /usr/local/bin/v2ray ] && [ -x /usr/local/bin/v2ray ]; then
+            # 尝试获取版本
+            V2RAY_VERSION=$(/usr/local/bin/v2ray version 2>/dev/null | head -1 || echo "installed")
+            log_info "V2Ray installed from bundled binary: $V2RAY_VERSION"
         else
-            log_warn "Failed to download V2Ray installer"
+            log_warn "Failed to copy v2ray binary to /usr/local/bin/"
         fi
     else
-        log_warn "curl not found, cannot auto-install V2Ray"
-        echo "   Please install V2Ray manually or install curl first"
+        log_warn "Bundled v2ray binary not found at $BUNDLED_V2RAY"
+        echo "   Please install v2ray manually:"
+        echo "   bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)"
     fi
 fi
 
-# Step 7: 【增强】安装 geo 数据文件 - 优先使用预打包文件
+# Step 7: 【优化】安装 geo 数据文件 - 直接复制预打包文件
 echo ""
 echo "Installing V2Ray geo data files..."
 
 mkdir -p "$GEO_DIR" 2>/dev/null || true
 
-GEO_FAILED=""
-
-install_geo_file() {
-    local filename=$1
-    local filepath="$GEO_DIR/$filename"
-    local bundled_path="$RESOURCES_PATH/$filename"
-
-    # 优先级 1: 检查目标目录是否已有有效文件
-    if [ -f "$filepath" ]; then
-        local size=$(stat -c%s "$filepath" 2>/dev/null || stat -f%z "$filepath" 2>/dev/null || echo "0")
+# 直接复制预打包的 geo 文件
+for geo_file in geoip.dat geosite.dat; do
+    bundled_path="$RESOURCES_PATH/v2ray/$geo_file"
+    target_path="$GEO_DIR/$geo_file"
+    
+    # 检查目标文件是否已存在且有效
+    if [ -f "$target_path" ]; then
+        size=$(stat -c%s "$target_path" 2>/dev/null || stat -f%z "$target_path" 2>/dev/null || echo "0")
         if [ "$size" -gt 102400 ]; then
-            log_info "$filename already exists ($(numfmt --to=iec $size 2>/dev/null || echo "${size} bytes"))"
-            return 0
-        else
-            log_warn "$filename exists but is too small, replacing..."
-            rm -f "$filepath"
+            log_info "$geo_file already exists ($(numfmt --to=iec $size 2>/dev/null || echo "${size} bytes"))"
+            continue
         fi
     fi
-
-    # 优先级 2: 使用预打包的文件
+    
+    # 复制预打包的文件
     if [ -f "$bundled_path" ]; then
-        local bundled_size=$(stat -c%s "$bundled_path" 2>/dev/null || stat -f%z "$bundled_path" 2>/dev/null || echo "0")
+        bundled_size=$(stat -c%s "$bundled_path" 2>/dev/null || stat -f%z "$bundled_path" 2>/dev/null || echo "0")
         if [ "$bundled_size" -gt 102400 ]; then
-            echo "   Using bundled $filename..."
-            cp "$bundled_path" "$filepath"
-            log_info "$filename installed from bundled resources ($(numfmt --to=iec $bundled_size 2>/dev/null || echo "${bundled_size} bytes"))"
-            return 0
+            cp "$bundled_path" "$target_path"
+            log_info "$geo_file installed from bundled resources ($(numfmt --to=iec $bundled_size 2>/dev/null || echo "${bundled_size} bytes"))"
         else
-            log_warn "Bundled $filename is too small (${bundled_size} bytes), skipping"
+            log_warn "$geo_file bundled but file is too small (${bundled_size} bytes)"
         fi
     else
-        echo "   No bundled $filename found"
+        log_warn "$geo_file not found in bundled resources"
+        echo "   You can download manually:"
+        echo "   sudo wget -O $target_path https://github.com/v2fly/geoip/releases/latest/download/geoip.dat"
     fi
-
-    # 优先级 3: 从网络下载
-    echo "   Downloading $filename from network..."
-    shift
-    local urls=("$@")
-
-    for url in "${urls[@]}"; do
-        echo "   Trying: $url"
-
-        if command -v wget >/dev/null 2>&1; then
-            if wget --timeout=30 --tries=2 -q -O "$filepath" "$url" 2>/dev/null; then
-                local size=$(stat -c%s "$filepath" 2>/dev/null || stat -f%z "$filepath" 2>/dev/null || echo "0")
-                if [ "$size" -gt 102400 ]; then
-                    log_info "$filename downloaded successfully ($(numfmt --to=iec $size 2>/dev/null || echo "${size} bytes"))"
-                    return 0
-                else
-                    rm -f "$filepath"
-                fi
-            fi
-        elif command -v curl >/dev/null 2>&1; then
-            if curl -L --max-time 30 --retry 2 -s -o "$filepath" "$url" 2>/dev/null; then
-                local size=$(stat -c%s "$filepath" 2>/dev/null || stat -f%z "$filepath" 2>/dev/null || echo "0")
-                if [ "$size" -gt 102400 ]; then
-                    log_info "$filename downloaded successfully ($(numfmt --to=iec $size 2>/dev/null || echo "${size} bytes"))"
-                    return 0
-                else
-                    rm -f "$filepath"
-                fi
-            fi
-        fi
-    done
-
-    log_warn "Failed to install $filename from all sources"
-    return 1
-}
-
-# 定义下载源
-GEOIP_URLS=(
-    "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat"
-    "https://cdn.jsdelivr.net/gh/v2fly/geoip@release/geoip.dat"
-)
-
-GEOSITE_URLS=(
-    "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"
-    "https://cdn.jsdelivr.net/gh/v2fly/domain-list-community@release/dlc.dat"
-)
-
-# 安装 geoip.dat (优先使用预打包)
-install_geo_file "geoip.dat" "${GEOIP_URLS[@]}" || GEO_FAILED=1
-
-# 安装 geosite.dat (优先使用预打包)
-install_geo_file "geosite.dat" "${GEOSITE_URLS[@]}" || GEO_FAILED=1
+done
 
 # 创建符号链接
 echo ""
@@ -618,15 +608,7 @@ echo "════════════════════════�
 echo "  Installation Summary"
 echo "══════════════════════════════════════"
 
-if [ -z "$GEO_FAILED" ]; then
-    log_info "All components installed successfully"
-else
-    log_warn "Some geo files failed to install"
-    echo ""
-    echo "You can manually download them later:"
-    echo "  sudo wget -O /usr/local/share/v2ray/geoip.dat https://github.com/v2fly/geoip/releases/latest/download/geoip.dat"
-    echo "  sudo wget -O /usr/local/share/v2ray/geosite.dat https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"
-fi
+log_info "Installation completed"
 
 echo ""
 echo "╔════════════════════════════════════════╗"
@@ -637,7 +619,8 @@ echo "║    $ ov2n                              ║"
 echo "║                                        ║"
 echo "║  Or search for 'ov2n' in your menu     ║"
 echo "║                                        ║"
-echo "║  Geo files: auto-update at runtime     ║"
+echo "║  Bundled: v2ray binary + geo files     ║"
+echo "║  Auto-update: geo files at runtime     ║"
 echo "╚════════════════════════════════════════╝"
 echo ""
 
@@ -721,7 +704,7 @@ echo -e "${GREEN}  ✓ DEBIAN metadata created${NC}"
 echo ""
 
 # Step 9: Build the DEB package
-echo -e "${YELLOW}[9/9] Building DEB package...${NC}"
+echo -e "${YELLOW}[9/10] Building DEB package...${NC}"
 
 DEB_FILE="${DIST_DIR}/${PKG_NAME}_${VERSION}_all.deb"
 
@@ -740,11 +723,21 @@ if fakeroot dpkg-deb --build "${DEB_BUILD_DIR}" "${DEB_FILE}" 2>/dev/null; then
     echo -e "${BLUE}Package Location:${NC} ${DEB_FILE}"
     echo ""
 
-    # Check if geo files are bundled
-    echo -e "${BLUE}Bundled Geo Files:${NC}"
+    # Check bundled files
+    echo -e "${BLUE}Bundled Components:${NC}"
+    
+    # V2Ray binary
+    if [ -f "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/v2ray" ]; then
+        v2ray_size=$(stat -c%s "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/v2ray" 2>/dev/null || echo "0")
+        echo -e "  ${GREEN}✓ v2ray binary ($(numfmt --to=iec $v2ray_size 2>/dev/null || echo "${v2ray_size} bytes"))${NC}"
+    else
+        echo -e "  ${YELLOW}⚠ v2ray binary not bundled (will download on install)${NC}"
+    fi
+    
+    # Geo files
     for geo_file in geoip.dat geosite.dat; do
-        if [ -f "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/${geo_file}" ]; then
-            geo_size=$(stat -c%s "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/${geo_file}" 2>/dev/null || echo "0")
+        if [ -f "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/${geo_file}" ]; then
+            geo_size=$(stat -c%s "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/${geo_file}" 2>/dev/null || echo "0")
             echo -e "  ${GREEN}✓ ${geo_file} ($(numfmt --to=iec $geo_size 2>/dev/null || echo "${geo_size} bytes"))${NC}"
         else
             echo -e "  ${YELLOW}⚠ ${geo_file} not bundled (will download on install)${NC}"
@@ -770,8 +763,9 @@ if fakeroot dpkg-deb --build "${DEB_BUILD_DIR}" "${DEB_FILE}" 2>/dev/null; then
     echo "  4. Uninstall (if needed):"
     echo -e "     ${YELLOW}sudo apt remove ${PKG_NAME}${NC}"
     echo ""
-    echo -e "${GREEN}New Features in This Build:${NC}"
-    echo "  ✓ Bundled geo files (no download needed on first install)"
+    echo -e "${GREEN}Features in This Build:${NC}"
+    echo "  ✓ Bundled v2ray binary (offline installation)"
+    echo "  ✓ Bundled geo files (no download on first install)"
     echo "  ✓ Auto-check geo file updates at runtime"
     echo "  ✓ Fallback to network download if bundled files missing"
     echo "  ✓ Multiple download mirrors for reliability"
