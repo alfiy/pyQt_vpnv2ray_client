@@ -24,7 +24,7 @@ import urllib.request
 import socket
 
 
-# ============ 最小侵入式调试日志 ============
+# ============ 调试日志 ============
 DEBUG_LOG = "/tmp/vpn-helper-debug.log"
 
 def log_debug(msg):
@@ -1053,9 +1053,28 @@ def main():
             print("启动失败", file=sys.stderr)
             sys.exit(1)
 
+    elif command == "start-vpn-only":
+        if len(sys.argv) < 3:
+            print("用法: vpn-helper.py start-vpn-only <vpn_config>", file=sys.stderr)
+            sys.exit(1)
+        
+        vpn_config = sys.argv[2]
+        if not os.path.exists(vpn_config):
+            print(f"错误: OpenVPN 配置文件不存在: {vpn_config}", file=sys.stderr)
+            sys.exit(1)
+        
+        print("正在启动 OpenVPN...")
+        openvpn_pid = start_openvpn(vpn_config)
+        
+        if openvpn_pid:
+            print("启动成功")
+            sys.exit(0)
+        else:
+            print("启动失败", file=sys.stderr)
+            sys.exit(1)
     else:
         print(f"未知命令: {command}", file=sys.stderr)
-        print("可用命令: start, stop, tproxy-start, tproxy-stop", file=sys.stderr)
+        print("可用命令: start, stop, start-vpn-only, start-v2ray-only, tproxy-start, tproxy-stop", file=sys.stderr)
         sys.exit(1)
 
 
