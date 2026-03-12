@@ -1,6 +1,12 @@
 """
-SS URL 配置管理器
+SS URL 配置管理器 (修复版)
 负责解析 SS URL 并生成/更新 V2Ray 配置
+
+修复内容:
+- 修复 Base64 格式判断逻辑,正确处理 ss://base64==@server:port 格式
+- 支持混合格式: ss://base64@server:port
+- 增强调试信息
+- 修复 warn_legacy 误判：只有完全Base64且解码后含@的才是真正遗留格式
 """
 import json
 import os
@@ -49,7 +55,7 @@ class ShadowsocksServer:
 
 
 class SSUrlParser:
-    """SIP002 SS URL 解析器"""
+    """SIP002 SS URL 解析器 (增强版)"""
     
     # 支持的加密方法列表
     SUPPORTED_METHODS = [
@@ -61,10 +67,14 @@ class SSUrlParser:
     @staticmethod
     def parse(ss_url: str) -> Optional[ShadowsocksServer]:
         """
-        解析 SS URL (SIP002 标准)
-        支持格式:
-        - ss://method:password@server:port#remark (明文)
-        - ss://base64(method:password@server:port)#remark (Base64)
+        解析 SS URL，支持以下三种格式:
+        1. ss://method:password@server:port#remark          (明文, 现代格式)
+        2. ss://base64(method:password)@server:port#remark  (混合 Base64, 现代格式)
+        3. ss://base64(method:password@server:port)#remark  (完全 Base64, 遗留格式)
+
+        warn_legacy 判断规则:
+        - 格式1、格式2: warn_legacy = False (现代合法格式)
+        - 格式3: warn_legacy = True  (真正的遗留格式，解码后才能拿到服务器地址)
         """
         if not ss_url or not ss_url.startswith("ss://"):
             return None
@@ -84,66 +94,131 @@ class SSUrlParser:
                 except:
                     server.remark = remark_encoded
             
-            # 判断是否为 Base64 编码
-            if "@" in content and ":" in content.split("@")[0]:
-                # 明文格式: method:password@server:port
-                user_info, server_part = content.rsplit("@", 1)
-            else:
-                # Base64 编码格式
-                # 处理可能的 URL 安全 Base64 (替换 -_ 为 +/)
-                base64_str = content.replace("-", "+").replace("_", "/")
-                # 补齐 padding
-                padding = 4 - len(base64_str) % 4
-                if padding != 4:
-                    base64_str += "=" * padding
-                
-                try:
-                    decoded = base64.b64decode(base64_str).decode("utf-8")
-                except Exception:
-                    return None
-                
-                if "@" not in decoded:
-                    return None
-                
-                user_info, server_part = decoded.rsplit("@", 1)
-                server.warn_legacy = True  # 标记为遗留格式
+            # ==================== 判断格式 ====================
+            is_plaintext = False
             
-            # 解析用户信息 (method:password)
+            if "@" in content:
+                userinfo_part = content.split("@")[0]
+                if ":" in userinfo_part:
+                    method_candidate = userinfo_part.split(":")[0]
+                    method_lower = method_candidate.lower()
+                    if method_lower in [m.lower() for m in SSUrlParser.SUPPORTED_METHODS]:
+                        is_plaintext = True
+                        print(f"[解析] 检测到明文格式: method={method_candidate}")
+            
+            # ==================== 按格式解析 ====================
+            if is_plaintext:
+                # 格式1: 明文 method:password@server:port，现代格式，不标记遗留
+                user_info, server_part = content.rsplit("@", 1)
+                server.warn_legacy = False
+                print(f"[解析] 明文模式: userinfo={user_info}, server={server_part}")
+
+            else:
+                # Base64 编码格式（格式2 或 格式3）
+                print(f"[解析] Base64 模式: content={content}")
+
+                if "@" in content:
+                    # 格式2: ss://base64(method:password)@server:port
+                    # URL 中有 @，服务器地址直接可见，属于现代合法格式
+                    base64_part, server_part = content.split("@", 1)
+                    print(f"[解析] 混合 Base64 格式 (现代): base64={base64_part}, server={server_part}")
+
+                    base64_str = base64_part.replace("-", "+").replace("_", "/")
+                    padding = 4 - len(base64_str) % 4
+                    if padding != 4:
+                        base64_str += "=" * padding
+
+                    try:
+                        decoded = base64.b64decode(base64_str).decode("utf-8")
+                        print(f"[解析] Base64 解码成功: {decoded}")
+                    except Exception as e:
+                        print(f"[解析] Base64 解码失败: {e}")
+                        return None
+
+                    if "@" in decoded:
+                        # 解码后仍含 @，说明 base64 部分编码了完整的 user@host 信息
+                        # 以解码内容的 user_info 为准，server_part 仍用 URL 中的
+                        user_info, _ = decoded.rsplit("@", 1)
+                    else:
+                        user_info = decoded
+
+                    # 格式2 是现代合法格式，不标记遗留
+                    server.warn_legacy = False
+
+                else:
+                    # 格式3: ss://base64(method:password@server:port)，完全编码
+                    # 服务器地址隐藏在 Base64 中，属于遗留格式
+                    base64_part = content
+                    server_part = None
+                    print(f"[解析] 完全 Base64 格式 (遗留): base64={base64_part}")
+
+                    base64_str = base64_part.replace("-", "+").replace("_", "/")
+                    padding = 4 - len(base64_str) % 4
+                    if padding != 4:
+                        base64_str += "=" * padding
+
+                    try:
+                        decoded = base64.b64decode(base64_str).decode("utf-8")
+                        print(f"[解析] Base64 解码成功: {decoded}")
+                    except Exception as e:
+                        print(f"[解析] Base64 解码失败: {e}")
+                        return None
+
+                    if "@" in decoded:
+                        # 解码后含 @：完整的 method:password@server:port，真正的遗留格式
+                        user_info, server_part = decoded.rsplit("@", 1)
+                        server.warn_legacy = True  # ← 只在这里标记遗留
+                        print(f"[解析] 标记为遗留格式")
+                    else:
+                        # 解码后不含 @：理论上不应出现，尝试当作纯 user_info 处理
+                        user_info = decoded
+                        server.warn_legacy = False
+                        print(f"[解析] 完全 Base64 解码后无 @，当作 user_info 处理")
+
+                if not server_part:
+                    print(f"[解析] 缺少服务器信息")
+                    return None
+
+            # ==================== 解析用户信息 ====================
             if ":" not in user_info:
+                print(f"[解析] 用户信息格式错误: {user_info}")
                 return None
             
             server.method, server.password = user_info.split(":", 1)
+            print(f"[解析] 加密方法: {server.method}, 密码: {server.password[:3]}***")
             
-            # 解析服务器部分 (server:port)
-            if ":" not in server_part:
+            # ==================== 解析服务器信息 ====================
+            if not server_part or ":" not in server_part:
+                print(f"[解析] 服务器信息格式错误: {server_part}")
                 return None
             
-            # 处理 IPv6 地址 [addr]:port 和普通地址 addr:port
             if server_part.startswith("[") and "]:" in server_part:
-                # IPv6 格式: [::1]:8080
+                # IPv6: [::1]:8080
                 server.address, port_str = server_part.rsplit(":", 1)
-                server.address = server.address[1:-1]  # 去掉 []
+                server.address = server.address[1:-1]
                 server.port = int(port_str)
             else:
-                # IPv4/域名格式: 1.2.3.4:8080 或 domain.com:8080
+                # IPv4/域名: 1.2.3.4:8080
                 server.address, port_str = server_part.rsplit(":", 1)
                 server.port = int(port_str)
             
-            # 验证加密方法
-            if server.method not in SSUrlParser.SUPPORTED_METHODS:
-                # 尝试匹配，可能是大小写问题
-                method_lower = server.method.lower()
-                if method_lower in [m.lower() for m in SSUrlParser.SUPPORTED_METHODS]:
-                    # 标准化方法名
-                    for m in SSUrlParser.SUPPORTED_METHODS:
-                        if m.lower() == method_lower:
-                            server.method = m
-                            break
+            print(f"[解析] 服务器地址: {server.address}:{server.port}")
             
+            # ==================== 验证加密方法 ====================
+            if server.method not in SSUrlParser.SUPPORTED_METHODS:
+                method_lower = server.method.lower()
+                for m in SSUrlParser.SUPPORTED_METHODS:
+                    if m.lower() == method_lower:
+                        server.method = m
+                        break
+            
+            print(f"[解析] ✓ 解析成功: {server} (遗留格式={server.warn_legacy})")
             return server
             
         except Exception as e:
-            print(f"解析 SS URL 失败: {e}")
+            print(f"[解析] ✗ 解析失败: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     @staticmethod
@@ -155,8 +230,6 @@ class SSUrlParser:
         if not input_text:
             return servers
         
-        # 清理并分割输入
-        # 支持 ss:// 开头的任何内容
         urls = re.findall(r'ss://[^\s,]+', input_text)
         
         for url in urls:
@@ -170,7 +243,6 @@ class SSUrlParser:
 class V2RayConfigManager:
     """V2Ray 配置管理器"""
     
-    # 默认 V2Ray 配置模板
     DEFAULT_CONFIG = {
         "log": {
             "loglevel": "warning"
@@ -286,7 +358,6 @@ class V2RayConfigManager:
         self.config = self._load_config()
     
     def _load_config(self) -> Dict:
-        """加载现有配置或创建默认配置"""
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, 'r', encoding='utf-8') as f:
@@ -297,7 +368,6 @@ class V2RayConfigManager:
         return self.DEFAULT_CONFIG.copy()
     
     def save_config(self) -> bool:
-        """保存配置到文件"""
         try:
             os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
             with open(self.config_path, 'w', encoding='utf-8') as f:
@@ -308,17 +378,11 @@ class V2RayConfigManager:
             return False
     
     def update_shadowsocks_server(self, server: ShadowsocksServer) -> bool:
-        """
-        更新 Shadowsocks 服务器配置（替换现有的 proxy outbound）
-        """
         try:
-            # 确保 outbounds 存在
             if "outbounds" not in self.config:
                 self.config["outbounds"] = []
             
             outbounds = self.config["outbounds"]
-            
-            # 查找并替换现有的 shadowsocks outbound
             proxy_index = -1
             for i, outbound in enumerate(outbounds):
                 if outbound.get("tag") == "proxy":
@@ -330,7 +394,6 @@ class V2RayConfigManager:
             if proxy_index >= 0:
                 outbounds[proxy_index] = new_outbound
             else:
-                # 如果没有找到 proxy tag，插入到第一个位置
                 outbounds.insert(0, new_outbound)
             
             return self.save_config()
@@ -340,14 +403,10 @@ class V2RayConfigManager:
             return False
     
     def add_shadowsocks_server(self, server: ShadowsocksServer) -> bool:
-        """
-        添加新的 Shadowsocks 服务器（作为新的 outbound）
-        """
         try:
             if "outbounds" not in self.config:
                 self.config["outbounds"] = []
             
-            # 生成唯一的 tag
             base_tag = "ss-" + server.address.replace(".", "-")
             tag = base_tag
             counter = 1
@@ -367,7 +426,6 @@ class V2RayConfigManager:
             return False
     
     def get_current_servers(self) -> List[Tuple[str, str, int]]:
-        """获取当前配置中的所有 SS 服务器列表 (tag, address, port)"""
         servers = []
         for outbound in self.config.get("outbounds", []):
             if outbound.get("protocol") == "shadowsocks":
@@ -387,9 +445,6 @@ class SSConfigDialog:
     
     @staticmethod
     def ask_import_ss_url(parent, url: str, server: ShadowsocksServer) -> bool:
-        """
-        询问用户是否确认导入（模仿 Shadowsocks-Windows 的 AskAddServerBySSURL）
-        """
         preview = f"{server.remark or 'New Server'} ({server.address}:{server.port})"
         
         reply = QMessageBox.question(
@@ -404,7 +459,6 @@ class SSConfigDialog:
     
     @staticmethod
     def show_success(parent, server: ShadowsocksServer):
-        """显示导入成功消息"""
         QMessageBox.information(
             parent,
             "导入成功",
@@ -415,12 +469,10 @@ class SSConfigDialog:
     
     @staticmethod
     def show_error(parent, message: str):
-        """显示错误消息"""
         QMessageBox.critical(parent, "导入失败", message)
     
     @staticmethod
     def show_legacy_warning(parent, server: ShadowsocksServer):
-        """显示遗留格式警告"""
         QMessageBox.warning(
             parent,
             "警告",
@@ -431,20 +483,8 @@ class SSConfigDialog:
 
 def import_ss_url_from_clipboard(parent, config_path: str, 
                                   replace_existing: bool = True) -> bool:
-    """
-    从剪贴板导入 SS URL（主入口函数）
-    
-    Args:
-        parent: 父窗口（用于显示对话框）
-        config_path: V2Ray 配置文件路径
-        replace_existing: 是否替换现有配置（True=替换 proxy outbound，False=添加新 outbound）
-    
-    Returns:
-        bool: 是否成功导入
-    """
     from PyQt5.QtWidgets import QApplication
     
-    # 获取剪贴板内容
     clipboard = QApplication.clipboard()
     text = clipboard.text()
     
@@ -452,11 +492,9 @@ def import_ss_url_from_clipboard(parent, config_path: str,
         SSConfigDialog.show_error(parent, "剪贴板为空")
         return False
     
-    # 解析 URL
     servers = SSUrlParser.parse_multiple(text)
     
     if not servers:
-        # 尝试单条解析
         server = SSUrlParser.parse(text.strip())
         if server:
             servers = [server]
@@ -466,17 +504,15 @@ def import_ss_url_from_clipboard(parent, config_path: str,
             "剪贴板中没有找到有效的 SS URL\n\n"
             "支持的格式:\n"
             "• ss://method:password@server:port#remark\n"
-            "• ss://base64(method:password@server:port)#remark")
+            "• ss://base64(method:password@server:port)#remark\n"
+            "• ss://base64(method:password)@server:port#remark")
         return False
     
-    # 处理第一个服务器（目前只处理单个，可扩展为批量）
     server = servers[0]
     
-    # 确认导入
     if not SSConfigDialog.ask_import_ss_url(parent, text.strip(), server):
         return False
     
-    # 更新配置
     manager = V2RayConfigManager(config_path)
     
     if replace_existing:
@@ -487,7 +523,7 @@ def import_ss_url_from_clipboard(parent, config_path: str,
     if success:
         SSConfigDialog.show_success(parent, server)
         
-        # 显示遗留格式警告
+        # 只有真正的遗留格式才显示警告
         if server.warn_legacy:
             SSConfigDialog.show_legacy_warning(parent, server)
         

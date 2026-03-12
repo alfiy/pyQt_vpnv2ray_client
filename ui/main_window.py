@@ -21,8 +21,7 @@ from PyQt5.QtWidgets import (
 )
 from core.ss_config_manager import (
     import_ss_url_from_clipboard, 
-    V2RayConfigManager,
-    SSUrlParser
+    V2RayConfigManager
 )
 from core.polkit_helper import PolkitHelper
 
