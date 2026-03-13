@@ -386,21 +386,17 @@ cd "$APP_DIR"
 export QT_API=pyqt5
 export PYTHONPATH="$APP_DIR:${PYTHONPATH:-}"
 
-exec "$PYTHON" -c "
-import sys, os
-sys.path.insert(0, '$APP_DIR')
-os.chdir('$APP_DIR')
-try:
-    from main import main
-    main()
-except ImportError as e:
-    print('Error: Failed to import main module: ' + str(e), file=sys.stderr)
-    print('Please ensure ov2n is properly installed.', file=sys.stderr)
-    sys.exit(1)
-except Exception as e:
-    print('Error: ' + str(e), file=sys.stderr)
-    sys.exit(1)
-" "$@"
+# ── 启动应用 ──────────────────────────────────────────────
+cd "$APP_DIR"
+export QT_API=pyqt5
+export PYTHONPATH="$APP_DIR:${PYTHONPATH:-}"
+
+# 【关键修复】直接用 main.py 文件启动，而非 -c 参数
+# 使用 -c 启动时 WM_CLASS 会变成 ("-c", "VPN Client")，
+# 导致 GNOME 无法通过 StartupWMClass=ov2n 匹配 .desktop 文件，
+# 从而标题栏无图标、Dock 图标也不正确。
+# 直接传文件路径，sys.argv[0] = "main.py"，WM_CLASS 由 Qt 内部正确设置。
+exec "$PYTHON" "$APP_DIR/main.py" "$@"
 LAUNCHER
 
 chmod +x "${DEB_BUILD_DIR}/usr/local/bin/${PKG_NAME}"
@@ -421,6 +417,7 @@ Icon=${PKG_NAME}
 Categories=Network;Utility;System;
 Terminal=false
 StartupNotify=true
+StartupWMClass=${PKG_NAME}
 Keywords=vpn;openvpn;v2ray;xray;proxy;network;security;
 
 [Desktop Action Help]
@@ -446,7 +443,7 @@ Version: ${VERSION}
 Architecture: all
 Maintainer: ${MAINTAINER}
 Homepage: https://github.com/alfiy/pyQt_vpnv2ray_client
-Depends: python3 (>= 3.8), python3-pyqt5, openvpn, policykit-1, iptables, wget | curl
+Depends: python3 (>= 3.8), python3-pyqt5, python3-xlib, openvpn, policykit-1, iptables, wget | curl
 Recommends: network-manager, python3-pyqt5.qtsvg
 Suggests: gnupg, iptables-persistent
 Priority: optional
@@ -467,6 +464,7 @@ Description: Integrated OpenVPN and V2Ray/Xray VPN Client
   - Auto-check geo file updates at runtime
   - Cross-platform compatibility (Ubuntu/Kylin/Debian)
 CONTROL
+
 
 # ============================================================
 # postinst - 增强版 PyQt5 检测与自动修复
@@ -610,6 +608,41 @@ update-desktop-database /usr/share/applications 2>/dev/null || true
 gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
 log_info "Desktop database updated"
 
+# Step 7.5: 清理之前版本错误写入到用户目录的盾牌图标
+echo ""
+echo "Cleaning up legacy user icon cache..."
+for uid_dir in /home/*/; do
+    [ -d "$uid_dir" ] || continue
+    username=$(basename "$uid_dir")
+    xdg_icons="${uid_dir}.local/share/icons/hicolor"
+    [ -d "$xdg_icons" ] || continue
+    cleaned=false
+    for size_dir in "$xdg_icons"/*/apps/; do
+        [ -d "$size_dir" ] || continue
+        user_icon="${size_dir}ov2n.png"
+        [ -f "$user_icon" ] || continue
+        size_name=$(basename "$(dirname "$size_dir")")
+        system_icon="/usr/share/icons/hicolor/${size_name}/apps/ov2n.png"
+        if [ ! -f "$system_icon" ]; then
+            rm -f "$user_icon" 2>/dev/null || true
+            cleaned=true
+            continue
+        fi
+        user_sz=$(stat -c%s "$user_icon" 2>/dev/null || echo "0")
+        sys_sz=$(stat -c%s "$system_icon" 2>/dev/null || echo "1")
+        if [ "$user_sz" != "$sys_sz" ]; then
+            rm -f "$user_icon" 2>/dev/null || true
+            cleaned=true
+        fi
+    done
+    if [ "$cleaned" = true ]; then
+        su - "$username" -c \
+            "gtk-update-icon-cache -f -t '$xdg_icons' 2>/dev/null || true" \
+            2>/dev/null || true
+    fi
+done
+log_info "User icon cache cleaned"
+
 # ============================================================
 # Step 8: 【关键修复】验证 PyQt5 - 与启动脚本用相同的探测逻辑
 # ============================================================
@@ -706,6 +739,50 @@ else
         echo ""
         # 仅警告，不中断安装（包本身已正确安装，只是缺运行时依赖）
         # 不 exit 1，让用户可以手动修复后直接运行
+    fi
+fi
+
+
+# ============================================================
+# Step 9: 验证 python3-xlib - Ubuntu 标题栏图标依赖
+# ============================================================
+echo ""
+echo "Verifying python3-xlib installation..."
+
+# 用与 PyQt5 相同的 python 解释器检测
+XLIB_OK=false
+CHECK_PY="${PYQT5_PYTHON:-python3}"
+
+if [ -x "$CHECK_PY" ] && "$CHECK_PY" -c "from Xlib import display" 2>/dev/null; then
+    XLIB_OK=true
+    log_info "python3-xlib found"
+else
+    log_warn "python3-xlib not found! Attempting automatic installation..."
+    echo ""
+
+    # 方法1: apt install python3-xlib（最可靠）
+    echo "   [1/2] Trying: apt install python3-xlib ..."
+    if apt-get install -y python3-xlib 2>/dev/null; then
+        if [ -x "$CHECK_PY" ] && "$CHECK_PY" -c "from Xlib import display" 2>/dev/null; then
+            log_info "python3-xlib installed successfully via apt"
+            XLIB_OK=true
+        fi
+    fi
+
+    # 方法2: pip 安装（apt 失败时兜底）
+    if [ "$XLIB_OK" = false ] && [ -x "$CHECK_PY" ]; then
+        echo "   [2/2] Trying: pip install python-xlib ..."
+        if "$CHECK_PY" -m pip install python-xlib --quiet 2>/dev/null; then
+            if "$CHECK_PY" -c "from Xlib import display" 2>/dev/null; then
+                log_info "python3-xlib installed via pip"
+                XLIB_OK=true
+            fi
+        fi
+    fi
+
+    if [ "$XLIB_OK" = false ]; then
+        log_warn "python3-xlib installation failed (window icon may not show in title bar)"
+        echo "  To fix manually: sudo apt install python3-xlib"
     fi
 fi
 

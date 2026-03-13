@@ -19,14 +19,14 @@
 - openvpn
 - v2ray 或 xray-core
 
-## 安装步骤
+## 开发环境构建
 
 ### 1. 安装系统依赖
 
 ```bash
 # Ubuntu/Debian
 sudo apt-get update
-sudo apt-get install python3-pyqt5 policykit-1 openvpn
+sudo apt-get install python3-pyqt5 policykit-1 openvpn python3-xlib
 
 # Fedora
 sudo dnf install python3-qt5 polkit openvpn
