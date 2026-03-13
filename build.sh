@@ -1,9 +1,7 @@
 #!/bin/bash
 # Build script for creating DEB packages on Linux (增强版 - 支持打包 v2ray)
 # Project: ov2n - OpenVPN + V2Ray Client
-# 增强功能: 
-# - 自动安装 V2Ray 和 geo 数据文件 (优先使用预打包文件)
-# - 支持打包预下载的 v2ray 二进制文件
+# 修复: 多发行版 PyQt5 兼容问题 (Kylin/Ubuntu/Debian 等)
 # Usage: ./build.sh [version] [distro]
 
 set -euo pipefail
@@ -74,13 +72,10 @@ fi
 ########################################
 clean_build() {
     echo -e "${YELLOW}Cleaning build artifacts...${NC}"
-
     rm -rf "${BUILD_DIR}" 2>/dev/null || true
     rm -rf "${DIST_DIR}" 2>/dev/null || true
-
     find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
     find . -type f -name "*.pyc" -delete 2>/dev/null || true
-
     echo -e "${GREEN}✓ Clean completed successfully${NC}"
     echo ""
 }
@@ -149,20 +144,16 @@ echo -e "${YELLOW}[3/10] Checking bundled v2ray and geo files...${NC}"
 BUNDLED_V2RAY_OK=false
 BUNDLED_GEO_OK=true
 
-# 检查 v2ray 二进制
 if [ -f "resources/v2ray/v2ray" ]; then
     V2RAY_SIZE=$(stat -c%s "resources/v2ray/v2ray" 2>/dev/null || stat -f%z "resources/v2ray/v2ray" 2>/dev/null || echo "0")
-    if [ "$V2RAY_SIZE" -gt 1048576 ]; then  # > 1MB
+    if [ "$V2RAY_SIZE" -gt 1048576 ]; then
         echo -e "${GREEN}  ✓ resources/v2ray/v2ray found ($(numfmt --to=iec $V2RAY_SIZE 2>/dev/null || echo "${V2RAY_SIZE} bytes"))${NC}"
-        
-        # 检查是否可执行
         if [ -x "resources/v2ray/v2ray" ]; then
             echo -e "${GREEN}  ✓ v2ray is executable${NC}"
         else
             echo -e "${YELLOW}  ⚠ v2ray is not executable, fixing...${NC}"
             chmod +x "resources/v2ray/v2ray"
         fi
-        
         BUNDLED_V2RAY_OK=true
     else
         echo -e "${YELLOW}  ⚠ resources/v2ray/v2ray is too small (${V2RAY_SIZE} bytes), may be invalid${NC}"
@@ -171,7 +162,6 @@ else
     echo -e "${YELLOW}  ⚠ resources/v2ray/v2ray not found${NC}"
 fi
 
-# 检查 geo 文件
 for geo_file in geoip.dat geosite.dat; do
     if [ -f "resources/v2ray/${geo_file}" ]; then
         GEO_SIZE=$(stat -c%s "resources/v2ray/${geo_file}" 2>/dev/null || stat -f%z "resources/v2ray/${geo_file}" 2>/dev/null || echo "0")
@@ -247,7 +237,9 @@ cp -v requirements.txt "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/" || {
     exit 1
 }
 
-# 复制可选的目录
+echo "${VERSION}" > "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/version.txt"
+echo -e "${GREEN}  ✓ version.txt created (${VERSION})${NC}"
+
 if [ -d "core" ]; then
     cp -rv core "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/" || true
     echo -e "${GREEN}  ✓ core directory copied${NC}"
@@ -263,28 +255,21 @@ if [ -d "polkit" ]; then
     echo -e "${GREEN}  ✓ polkit directory copied${NC}"
 fi
 
-# 【增强】复制 resources 目录
 if [ -d "resources" ]; then
-    # 复制 images 目录
     if [ -d "resources/images" ]; then
         mkdir -p "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/images"
         cp -rv resources/images/* "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/images/" 2>/dev/null || true
         echo -e "${GREEN}  ✓ resources/images directory copied${NC}"
     fi
-    
-    # 复制 v2ray 目录 (包含 v2ray 二进制、geoip.dat、geosite.dat)
     if [ -d "resources/v2ray" ]; then
         mkdir -p "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray"
         cp -rv resources/v2ray/* "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/" 2>/dev/null || true
         echo -e "${GREEN}  ✓ resources/v2ray directory copied${NC}"
-        
-        # 统计复制的文件
         if [ -f "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/v2ray" ]; then
             v2ray_size=$(stat -c%s "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/v2ray" 2>/dev/null || echo "0")
             chmod +x "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/v2ray"
             echo -e "${GREEN}    ✓ v2ray binary bundled ($(numfmt --to=iec $v2ray_size 2>/dev/null || echo "${v2ray_size} bytes"))${NC}"
         fi
-        
         for geo_file in geoip.dat geosite.dat; do
             if [ -f "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/${geo_file}" ]; then
                 geo_size=$(stat -c%s "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/${geo_file}" 2>/dev/null || echo "0")
@@ -294,7 +279,6 @@ if [ -d "resources" ]; then
     fi
 fi
 
-# Copy documentation
 for doc in README.md INSTALL.md LICENSE LICENSE.md COPYING; do
     if [ -f "$doc" ]; then
         cp -v "$doc" "${DEB_BUILD_DIR}/usr/share/doc/${PKG_NAME}/" || true
@@ -305,58 +289,118 @@ done
 echo -e "${GREEN}  ✓ Application files copied${NC}"
 echo ""
 
-# Copy application icons
 echo -e "${YELLOW}  Installing application icons...${NC}"
-
-cp resources/images/ov2n48.png  \
-   "${DEB_BUILD_DIR}/usr/share/icons/hicolor/48x48/apps/ov2n.png" 2>/dev/null || true
-
-cp resources/images/ov2n64.png  \
-   "${DEB_BUILD_DIR}/usr/share/icons/hicolor/64x64/apps/ov2n.png" 2>/dev/null || true
-
-cp resources/images/ov2n128.png \
-   "${DEB_BUILD_DIR}/usr/share/icons/hicolor/128x128/apps/ov2n.png" 2>/dev/null || true
-
-cp resources/images/ov2n256.png \
-   "${DEB_BUILD_DIR}/usr/share/icons/hicolor/256x256/apps/ov2n.png" 2>/dev/null || true
-
+cp resources/images/ov2n48.png  "${DEB_BUILD_DIR}/usr/share/icons/hicolor/48x48/apps/ov2n.png"   2>/dev/null || true
+cp resources/images/ov2n64.png  "${DEB_BUILD_DIR}/usr/share/icons/hicolor/64x64/apps/ov2n.png"   2>/dev/null || true
+cp resources/images/ov2n128.png "${DEB_BUILD_DIR}/usr/share/icons/hicolor/128x128/apps/ov2n.png" 2>/dev/null || true
+cp resources/images/ov2n256.png "${DEB_BUILD_DIR}/usr/share/icons/hicolor/256x256/apps/ov2n.png" 2>/dev/null || true
 chmod 644 "${DEB_BUILD_DIR}/usr/share/icons/hicolor/"*/apps/ov2n.png 2>/dev/null || true
-
 echo -e "${GREEN}  ✓ Icons installed${NC}"
 
+# ============================================================
 # Step 6: Create launcher script
+# 【修复核心】不再硬编码 #!/usr/bin/env python3
+# 改为运行时动态探测持有 PyQt5 的 Python 解释器
+# ============================================================
 echo -e "${YELLOW}[6/10] Creating launcher script...${NC}"
 
 cat > "${DEB_BUILD_DIR}/usr/local/bin/${PKG_NAME}" << 'LAUNCHER'
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-ov2n - OpenVPN + V2Ray/Xray Integrated Client
-A PyQt5-based GUI application for managing VPN connections
-"""
+#!/bin/bash
+# ov2n launcher - 自动探测正确的 Python 解释器
+# 修复: 不同发行版 python3 指向不同版本导致 PyQt5 找不到的问题
 
-import sys
-import os
+APP_DIR="/usr/local/lib/ov2n"
 
-# Set application directory
-APP_DIR = "/usr/local/lib/ov2n"
-sys.path.insert(0, APP_DIR)
-os.chdir(APP_DIR)
+# ── 动态探测持有 PyQt5 的 Python ──────────────────────────
+find_python() {
+    # 按优先级逐一尝试各 python 解释器
+    local candidates=(
+        "/usr/bin/python3"
+        "/usr/local/bin/python3"
+        "/usr/bin/python3.11"
+        "/usr/bin/python3.10"
+        "/usr/bin/python3.9"
+        "/usr/bin/python3.8"
+        "/usr/local/bin/python3.11"
+        "/usr/local/bin/python3.10"
+        "/usr/local/bin/python3.9"
+        "/usr/local/bin/python3.8"
+    )
 
-# Set environment variables
-os.environ['QT_API'] = 'pyqt5'
+    for py in "${candidates[@]}"; do
+        if [ -x "$py" ] && "$py" -c "import PyQt5.QtWidgets" 2>/dev/null; then
+            echo "$py"
+            return 0
+        fi
+    done
 
+    # 最后用 find 全盘搜索（慢但全面）
+    while IFS= read -r py; do
+        if [ -x "$py" ] && "$py" -c "import PyQt5.QtWidgets" 2>/dev/null; then
+            echo "$py"
+            return 0
+        fi
+    done < <(find /usr -name "python3*" -type f 2>/dev/null | sort -V)
+
+    return 1
+}
+
+# ── 处理 --version / -v（不启动 GUI）─────────────────────
+if [[ "${1:-}" == "--version" || "${1:-}" == "-v" ]]; then
+    VERSION_FILE="${APP_DIR}/version.txt"
+    if [ -f "$VERSION_FILE" ]; then
+        echo "ov2n version $(cat "$VERSION_FILE")"
+    else
+        echo "ov2n version unknown"
+    fi
+    exit 0
+fi
+
+# ── 找到可用的 Python ──────────────────────────────────────
+PYTHON=$(find_python)
+
+if [ -z "$PYTHON" ]; then
+    echo "错误: 未找到安装了 PyQt5 的 Python 解释器" >&2
+    echo "" >&2
+    echo "请运行以下命令安装 PyQt5:" >&2
+    echo "  sudo apt install python3-pyqt5" >&2
+    echo "" >&2
+    echo "如果仍然失败，请尝试:" >&2
+    echo "  sudo pip3 install PyQt5" >&2
+
+    # 尝试弹出图形化错误提示（如果有 zenity 或 kdialog）
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --error \
+            --title="ov2n 启动失败" \
+            --text="缺少依赖: PyQt5\n\n请运行: sudo apt install python3-pyqt5" \
+            2>/dev/null || true
+    elif command -v kdialog >/dev/null 2>&1; then
+        kdialog --error "缺少依赖: PyQt5\n\n请运行: sudo apt install python3-pyqt5" \
+            --title "ov2n 启动失败" 2>/dev/null || true
+    fi
+    exit 1
+fi
+
+# ── 启动应用 ──────────────────────────────────────────────
+cd "$APP_DIR"
+export QT_API=pyqt5
+export PYTHONPATH="$APP_DIR:${PYTHONPATH:-}"
+
+exec "$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$APP_DIR')
+os.chdir('$APP_DIR')
 try:
     from main import main
-    if __name__ == "__main__":
-        main()
+    main()
 except ImportError as e:
-    print(f"Error: Failed to import main module: {e}", file=sys.stderr)
-    print("Please ensure ov2n is properly installed.", file=sys.stderr)
+    print('Error: Failed to import main module: ' + str(e), file=sys.stderr)
+    print('Please ensure ov2n is properly installed.', file=sys.stderr)
     sys.exit(1)
 except Exception as e:
-    print(f"Error: {e}", file=sys.stderr)
+    print('Error: ' + str(e), file=sys.stderr)
     sys.exit(1)
+" "$@"
 LAUNCHER
 
 chmod +x "${DEB_BUILD_DIR}/usr/local/bin/${PKG_NAME}"
@@ -387,7 +431,13 @@ DESKTOP
 echo -e "${GREEN}  ✓ Desktop entry created${NC}"
 echo ""
 
+# ============================================================
 # Step 8: Create DEBIAN control file and scripts
+# 【修复核心】
+# 1. Depends 加入 python3-pyqt5 硬依赖
+# 2. postinst 用与启动脚本相同的探测逻辑验证 PyQt5
+# 3. 检测不到时自动尝试 apt / pip 安装
+# ============================================================
 echo -e "${YELLOW}[8/10] Creating DEBIAN metadata...${NC}"
 
 cat > "${DEB_BUILD_DIR}/DEBIAN/control" << CONTROL
@@ -397,7 +447,7 @@ Architecture: all
 Maintainer: ${MAINTAINER}
 Homepage: https://github.com/alfiy/pyQt_vpnv2ray_client
 Depends: python3 (>= 3.8), python3-pyqt5, openvpn, policykit-1, iptables, wget | curl
-Recommends: network-manager
+Recommends: network-manager, python3-pyqt5.qtsvg
 Suggests: gnupg, iptables-persistent
 Priority: optional
 Section: net
@@ -415,10 +465,12 @@ Description: Integrated OpenVPN and V2Ray/Xray VPN Client
   - PolicyKit integration for privilege escalation
   - Bundled geo data files and v2ray binary
   - Auto-check geo file updates at runtime
-  - Cross-platform compatibility
+  - Cross-platform compatibility (Ubuntu/Kylin/Debian)
 CONTROL
 
-# Create postinst script - 增强版 (支持预打包 v2ray)
+# ============================================================
+# postinst - 增强版 PyQt5 检测与自动修复
+# ============================================================
 cat > "${DEB_BUILD_DIR}/DEBIAN/postinst" << 'POSTINST'
 #!/bin/bash
 set -e
@@ -429,23 +481,14 @@ BIN_PATH="/usr/local/bin/${PKG_NAME}"
 RESOURCES_PATH="${PKG_PATH}/resources"
 GEO_DIR="/usr/local/share/v2ray"
 
-# 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-log_info() {
-    echo -e "${GREEN}✓${NC} $1"
-}
-
-log_warn() {
-    echo -e "${YELLOW}⚠${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}✗${NC} $1"
-}
+log_info()  { echo -e "${GREEN}✓${NC} $1"; }
+log_warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
+log_error() { echo -e "${RED}✗${NC} $1"; }
 
 echo ""
 echo "══════════════════════════════════════"
@@ -453,111 +496,87 @@ echo "  ov2n Installation & Configuration"
 echo "══════════════════════════════════════"
 echo ""
 
-# Step 1: Verify launcher exists
+# Step 1: Verify launcher exists and is executable
 if [ ! -f "${BIN_PATH}" ]; then
     log_error "Launcher script not found at ${BIN_PATH}"
     exit 1
 fi
+chmod +x "${BIN_PATH}" 2>/dev/null || true
 log_info "Launcher script verified"
 
-# Step 2: Make launcher executable
-chmod +x "${BIN_PATH}" 2>/dev/null || {
-    log_error "Failed to make launcher executable"
-    exit 1
-}
-log_info "Launcher script is executable"
-
-# Step 3: Verify package path exists
+# Step 2: Verify package path exists
 if [ ! -d "${PKG_PATH}" ]; then
     log_error "Package directory not found at ${PKG_PATH}"
     exit 1
 fi
 log_info "Package directory verified"
 
-# Step 4: Create convenient symlink
-if [ ! -d "/opt" ]; then
-    mkdir -p /opt
-fi
-ln -sf ${PKG_PATH} /opt/${PKG_NAME} 2>/dev/null || true
+# Step 3: Create convenient symlink
+mkdir -p /opt 2>/dev/null || true
+ln -sf "${PKG_PATH}" "/opt/${PKG_NAME}" 2>/dev/null || true
 log_info "Symlink created at /opt/${PKG_NAME}"
 
-# Step 5: Install polkit files if present
+# Step 4: Install polkit files if present
 if [ -d "${PKG_PATH}/polkit" ]; then
     echo ""
     echo "Configuring PolicyKit integration..."
-
-    if ls ${PKG_PATH}/polkit/*.policy 1> /dev/null 2>&1; then
+    if ls ${PKG_PATH}/polkit/*.policy 1>/dev/null 2>&1; then
         cp ${PKG_PATH}/polkit/*.policy /usr/share/polkit-1/actions/ 2>/dev/null || true
         log_info "PolicyKit policies installed"
     fi
-
     for script in ${PKG_PATH}/polkit/*.py; do
         if [ -f "$script" ]; then
             cp "$script" /usr/local/bin/ 2>/dev/null || true
-            chmod +x /usr/local/bin/$(basename $script) 2>/dev/null || true
+            chmod +x "/usr/local/bin/$(basename $script)" 2>/dev/null || true
         fi
     done
     log_info "Helper scripts installed"
 fi
 
-# Step 6: 【优化】安装 V2Ray - 直接复制预打包文件
+# Step 5: Install V2Ray binary
 echo ""
 echo "Installing V2Ray..."
-
 BUNDLED_V2RAY="${RESOURCES_PATH}/v2ray/v2ray"
 
-# 检查系统是否已安装 v2ray 或 xray
 if command -v v2ray >/dev/null 2>&1; then
     V2RAY_VERSION=$(v2ray version 2>/dev/null | head -1 || echo "unknown")
     log_info "V2Ray already installed: $V2RAY_VERSION"
 elif command -v xray >/dev/null 2>&1; then
     XRAY_VERSION=$(xray version 2>/dev/null | head -1 || echo "unknown")
     log_info "Xray already installed: $XRAY_VERSION"
-else
-    # 系统未安装,使用预打包的 v2ray
-    if [ -f "$BUNDLED_V2RAY" ]; then
-        echo "   Copying bundled v2ray binary to /usr/local/bin/..."
-        cp "$BUNDLED_V2RAY" /usr/local/bin/v2ray
-        chmod +x /usr/local/bin/v2ray
-        
-        # 验证文件是否成功复制
-        if [ -f /usr/local/bin/v2ray ] && [ -x /usr/local/bin/v2ray ]; then
-            # 尝试获取版本
-            V2RAY_VERSION=$(/usr/local/bin/v2ray version 2>/dev/null | head -1 || echo "installed")
-            log_info "V2Ray installed from bundled binary: $V2RAY_VERSION"
-        else
-            log_warn "Failed to copy v2ray binary to /usr/local/bin/"
-        fi
+elif [ -f "$BUNDLED_V2RAY" ]; then
+    echo "   Copying bundled v2ray binary to /usr/local/bin/..."
+    cp "$BUNDLED_V2RAY" /usr/local/bin/v2ray
+    chmod +x /usr/local/bin/v2ray
+    if [ -f /usr/local/bin/v2ray ] && [ -x /usr/local/bin/v2ray ]; then
+        V2RAY_VERSION=$(/usr/local/bin/v2ray version 2>/dev/null | head -1 || echo "installed")
+        log_info "V2Ray installed from bundled binary: $V2RAY_VERSION"
     else
-        log_warn "Bundled v2ray binary not found at $BUNDLED_V2RAY"
-        echo "   Please install v2ray manually:"
-        echo "   bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)"
+        log_warn "Failed to copy v2ray binary to /usr/local/bin/"
     fi
+else
+    log_warn "Bundled v2ray binary not found at $BUNDLED_V2RAY"
+    echo "   Please install v2ray manually:"
+    echo "   bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)"
 fi
 
-# Step 7: 【优化】安装 geo 数据文件 - 直接复制预打包文件
+# Step 6: Install geo data files
 echo ""
 echo "Installing V2Ray geo data files..."
-
 mkdir -p "$GEO_DIR" 2>/dev/null || true
 
-# 直接复制预打包的 geo 文件
 for geo_file in geoip.dat geosite.dat; do
     bundled_path="$RESOURCES_PATH/v2ray/$geo_file"
     target_path="$GEO_DIR/$geo_file"
-    
-    # 检查目标文件是否已存在且有效
     if [ -f "$target_path" ]; then
-        size=$(stat -c%s "$target_path" 2>/dev/null || stat -f%z "$target_path" 2>/dev/null || echo "0")
+        size=$(stat -c%s "$target_path" 2>/dev/null || echo "0")
         if [ "$size" -gt 102400 ]; then
             log_info "$geo_file already exists ($(numfmt --to=iec $size 2>/dev/null || echo "${size} bytes"))"
             continue
         fi
     fi
-    
-    # 复制预打包的文件
     if [ -f "$bundled_path" ]; then
-        bundled_size=$(stat -c%s "$bundled_path" 2>/dev/null || stat -f%z "$bundled_path" 2>/dev/null || echo "0")
+        bundled_size=$(stat -c%s "$bundled_path" 2>/dev/null || echo "0")
         if [ "$bundled_size" -gt 102400 ]; then
             cp "$bundled_path" "$target_path"
             log_info "$geo_file installed from bundled resources ($(numfmt --to=iec $bundled_size 2>/dev/null || echo "${bundled_size} bytes"))"
@@ -571,7 +590,6 @@ for geo_file in geoip.dat geosite.dat; do
     fi
 done
 
-# 创建符号链接
 echo ""
 echo "Creating geo file symlinks..."
 for link_dir in "/usr/bin" "/usr/local/bin" "/usr/share/v2ray"; do
@@ -585,21 +603,110 @@ for link_dir in "/usr/bin" "/usr/local/bin" "/usr/share/v2ray"; do
 done
 log_info "Symlinks created"
 
-# Step 8: Update desktop database
+# Step 7: Update desktop database
 echo ""
 echo "Updating desktop database..."
 update-desktop-database /usr/share/applications 2>/dev/null || true
 gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
 log_info "Desktop database updated"
 
-# Step 9: 验证 PyQt5 安装
+# ============================================================
+# Step 8: 【关键修复】验证 PyQt5 - 与启动脚本用相同的探测逻辑
+# ============================================================
 echo ""
 echo "Verifying PyQt5 installation..."
-if python3 -c "import PyQt5.QtWidgets" 2>/dev/null; then
-    log_info "PyQt5 is properly installed"
+
+# 与启动脚本保持一致: 按优先级探测每个 python 解释器
+find_python_with_pyqt5() {
+    local candidates=(
+        "/usr/bin/python3"
+        "/usr/local/bin/python3"
+        "/usr/bin/python3.11"
+        "/usr/bin/python3.10"
+        "/usr/bin/python3.9"
+        "/usr/bin/python3.8"
+        "/usr/local/bin/python3.11"
+        "/usr/local/bin/python3.10"
+        "/usr/local/bin/python3.9"
+        "/usr/local/bin/python3.8"
+    )
+    for py in "${candidates[@]}"; do
+        if [ -x "$py" ] && "$py" -c "import PyQt5.QtWidgets" 2>/dev/null; then
+            echo "$py"
+            return 0
+        fi
+    done
+    return 1
+}
+
+PYQT5_PYTHON=$(find_python_with_pyqt5 || true)
+
+if [ -n "$PYQT5_PYTHON" ]; then
+    PYQT5_VER=$("$PYQT5_PYTHON" -c "import PyQt5; print(PyQt5.QtCore.PYQT_VERSION_STR)" 2>/dev/null || echo "unknown")
+    log_info "PyQt5 ${PYQT5_VER} found at: $PYQT5_PYTHON"
 else
-    log_warn "PyQt5 not found!"
-    echo "   Please install: sudo apt install python3-pyqt5"
+    # PyQt5 未找到 - 尝试自动安装
+    log_warn "PyQt5 not found! Attempting automatic installation..."
+    echo ""
+
+    INSTALL_OK=false
+
+    # 方法1: apt install python3-pyqt5（系统级，最可靠）
+    echo "   [1/2] Trying: apt install python3-pyqt5 ..."
+    if apt-get install -y python3-pyqt5 2>/dev/null; then
+        # apt 安装完再探测一次
+        PYQT5_PYTHON=$(find_python_with_pyqt5 || true)
+        if [ -n "$PYQT5_PYTHON" ]; then
+            log_info "PyQt5 installed successfully via apt"
+            INSTALL_OK=true
+        fi
+    fi
+
+    # 方法2: 对每个 python 解释器尝试 pip 安装
+    if [ "$INSTALL_OK" = false ]; then
+        echo "   [2/2] Trying: pip install PyQt5 for each python..."
+        for py in "/usr/bin/python3" "/usr/local/bin/python3" \
+                  "/usr/bin/python3.11" "/usr/bin/python3.10" \
+                  "/usr/bin/python3.9"  "/usr/bin/python3.8"; do
+            if [ -x "$py" ]; then
+                echo "         Testing $py ..."
+                if "$py" -m pip install PyQt5 --quiet 2>/dev/null; then
+                    if "$py" -c "import PyQt5.QtWidgets" 2>/dev/null; then
+                        log_info "PyQt5 installed via pip for $py"
+                        INSTALL_OK=true
+                        PYQT5_PYTHON="$py"
+                        break
+                    fi
+                fi
+            fi
+        done
+    fi
+
+    # 自动安装失败 - 打印明确的手动修复指引
+    if [ "$INSTALL_OK" = false ]; then
+        echo ""
+        echo -e "${RED}════════════════════════════════════════════${NC}"
+        echo -e "${RED}  警告: PyQt5 安装失败，ov2n 将无法启动！${NC}"
+        echo -e "${RED}════════════════════════════════════════════${NC}"
+        echo ""
+        echo "  请手动运行以下命令修复:"
+        echo ""
+        echo "  方法1 (推荐):"
+        echo "    sudo apt install python3-pyqt5"
+        echo ""
+        echo "  方法2 (若方法1无效):"
+        echo "    sudo apt install python3-pip"
+        echo "    sudo pip3 install PyQt5"
+        echo ""
+        echo "  方法3 (指定具体 python 版本):"
+        echo "    # 先查看系统有哪些 python:"
+        echo "    ls /usr/bin/python3* /usr/local/bin/python3*"
+        echo "    # 对 PyQt5 所在版本的 python 安装:"
+        echo "    sudo /usr/bin/python3.X -m pip install PyQt5"
+        echo ""
+        # 仅警告，不中断安装（包本身已正确安装，只是缺运行时依赖）
+        # 不 exit 1，让用户可以手动修复后直接运行
+    fi
 fi
 
 # 最终总结
@@ -607,8 +714,10 @@ echo ""
 echo "══════════════════════════════════════"
 echo "  Installation Summary"
 echo "══════════════════════════════════════"
-
 log_info "Installation completed"
+if [ -n "${PYQT5_PYTHON:-}" ]; then
+    log_info "Runtime Python: $PYQT5_PYTHON"
+fi
 
 echo ""
 echo "╔════════════════════════════════════════╗"
@@ -633,18 +742,11 @@ chmod +x "${DEB_BUILD_DIR}/DEBIAN/postinst"
 cat > "${DEB_BUILD_DIR}/DEBIAN/prerm" << 'PRERM'
 #!/bin/bash
 set -e
-
 PKG_NAME="ov2n"
-
 echo "Cleaning up ${PKG_NAME}..."
-
-# Remove polkit files
 rm -f /usr/share/polkit-1/actions/org.example.vpnclient.policy 2>/dev/null || true
 rm -f /usr/local/bin/vpn-helper.py 2>/dev/null || true
-
-# Remove symlink
 rm -f /opt/${PKG_NAME} 2>/dev/null || true
-
 echo "✓ Pre-removal cleanup completed"
 exit 0
 PRERM
@@ -655,15 +757,9 @@ chmod +x "${DEB_BUILD_DIR}/DEBIAN/prerm"
 cat > "${DEB_BUILD_DIR}/DEBIAN/postrm" << 'POSTRM'
 #!/bin/bash
 set -e
-
-# 注意: 不删除 V2Ray 和 geo 文件,因为其他程序可能需要它们
-
 if [ "$1" = "purge" ]; then
     echo "Purging ov2n configuration..."
-    # 可以在这里删除用户配置文件
-    # rm -rf /etc/ov2n 2>/dev/null || true
 fi
-
 exit 0
 POSTRM
 
@@ -706,35 +802,28 @@ echo ""
 # Step 9: Build the DEB package
 echo -e "${YELLOW}[9/10] Building DEB package...${NC}"
 
-DEB_FILE="${DIST_DIR}/${PKG_NAME}_${VERSION}_all.deb"
+DEB_FILE="${DIST_DIR}/${PKG_NAME}_${VERSION}_amd64.deb"
 
 if fakeroot dpkg-deb --build "${DEB_BUILD_DIR}" "${DEB_FILE}" 2>/dev/null; then
     echo -e "${GREEN}  ✓ DEB package built successfully!${NC}"
     echo ""
 
-    # Display package information
     echo -e "${BLUE}Package Information:${NC}"
     dpkg -I "${DEB_FILE}" 2>/dev/null | head -25
     echo ""
 
-    # Display file size
     SIZE=$(du -h "${DEB_FILE}" | cut -f1)
     echo -e "${BLUE}Package Size:${NC} ${SIZE}"
     echo -e "${BLUE}Package Location:${NC} ${DEB_FILE}"
     echo ""
 
-    # Check bundled files
     echo -e "${BLUE}Bundled Components:${NC}"
-    
-    # V2Ray binary
     if [ -f "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/v2ray" ]; then
         v2ray_size=$(stat -c%s "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/v2ray" 2>/dev/null || echo "0")
         echo -e "  ${GREEN}✓ v2ray binary ($(numfmt --to=iec $v2ray_size 2>/dev/null || echo "${v2ray_size} bytes"))${NC}"
     else
         echo -e "  ${YELLOW}⚠ v2ray binary not bundled (will download on install)${NC}"
     fi
-    
-    # Geo files
     for geo_file in geoip.dat geosite.dat; do
         if [ -f "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/${geo_file}" ]; then
             geo_size=$(stat -c%s "${DEB_BUILD_DIR}/usr/local/lib/${PKG_NAME}/resources/v2ray/${geo_file}" 2>/dev/null || echo "0")
@@ -745,7 +834,6 @@ if fakeroot dpkg-deb --build "${DEB_BUILD_DIR}" "${DEB_FILE}" 2>/dev/null; then
     done
     echo ""
 
-    # Installation instructions
     echo -e "${BLUE}═══════════════════════════════════════${NC}"
     echo -e "${GREEN}Installation Instructions:${NC}"
     echo -e "${BLUE}═══════════════════════════════════════${NC}"
@@ -766,14 +854,13 @@ if fakeroot dpkg-deb --build "${DEB_BUILD_DIR}" "${DEB_FILE}" 2>/dev/null; then
     echo -e "${GREEN}Features in This Build:${NC}"
     echo "  ✓ Bundled v2ray binary (offline installation)"
     echo "  ✓ Bundled geo files (no download on first install)"
-    echo "  ✓ Auto-check geo file updates at runtime"
-    echo "  ✓ Fallback to network download if bundled files missing"
-    echo "  ✓ Multiple download mirrors for reliability"
-    echo "  ✓ Enhanced error handling and logging"
+    echo "  ✓ Auto-detect Python interpreter with PyQt5"
+    echo "  ✓ Auto-install PyQt5 if missing (apt + pip fallback)"
+    echo "  ✓ Friendly error message if PyQt5 still missing"
+    echo "  ✓ Cross-distro compatible (Ubuntu/Kylin/Debian)"
     echo ""
     echo -e "${BLUE}═══════════════════════════════════════${NC}"
     echo ""
-
 else
     echo -e "${RED}✗ Failed to build DEB package${NC}"
     exit 1
