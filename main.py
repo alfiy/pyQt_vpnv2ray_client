@@ -9,7 +9,7 @@ from ui.main_window import MainWindow
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("VPN Client")
+    app.setApplicationName("Ov2n Client")
     app.setOrganizationName("Example")
     
     window = MainWindow()

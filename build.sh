@@ -392,7 +392,7 @@ export QT_API=pyqt5
 export PYTHONPATH="$APP_DIR:${PYTHONPATH:-}"
 
 # 【关键修复】直接用 main.py 文件启动，而非 -c 参数
-# 使用 -c 启动时 WM_CLASS 会变成 ("-c", "VPN Client")，
+# 使用 -c 启动时 WM_CLASS 会变成 ("-c", "Ov2n Client")，
 # 导致 GNOME 无法通过 StartupWMClass=ov2n 匹配 .desktop 文件，
 # 从而标题栏无图标、Dock 图标也不正确。
 # 直接传文件路径，sys.argv[0] = "main.py"，WM_CLASS 由 Qt 内部正确设置。
@@ -410,7 +410,7 @@ cat > "${DEB_BUILD_DIR}/usr/share/applications/${PKG_NAME}.desktop" << DESKTOP
 [Desktop Entry]
 Type=Application
 Name=ov2n
-GenericName=VPN Client
+GenericName=Ov2n Client
 Comment=Integrated OpenVPN and V2Ray/Xray Client
 Exec=${PKG_NAME}
 Icon=${PKG_NAME}

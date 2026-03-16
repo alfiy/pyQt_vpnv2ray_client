@@ -4,7 +4,7 @@
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 
 <policyconfig>
-  <vendor>Example VPN Client</vendor>
+  <vendor>Example Ov2n Client</vendor>
   <vendor_url>https://example.com</vendor_url>
 
   <!-- 启动 VPN 服务的权限策略 -->

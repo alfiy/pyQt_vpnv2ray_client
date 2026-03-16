@@ -4,7 +4,6 @@ Polkit 集成模块
 """
 import subprocess
 import os
-import sys
 
 class PolkitHelper:
     """Polkit 权限提升辅助类"""
