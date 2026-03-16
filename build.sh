@@ -1,8 +1,8 @@
 #!/bin/bash
-# Build script for creating DEB packages on Linux (增强版 - 支持打包 v2ray)
+# Build script for creating packages (Linux DEB / Windows ZIP)
 # Project: ov2n - OpenVPN + V2Ray Client
 # 修复: 多发行版 PyQt5 兼容问题 (Kylin/Ubuntu/Debian 等)
-# Usage: ./build.sh [version] [distro]
+# Usage: ./build.sh [clean|rebuild] [--platform linux|windows] [--version X.Y.Z] [--debug]
 
 set -euo pipefail
 
@@ -19,6 +19,7 @@ NC='\033[0m' # No Color
 
 COMMAND="build"
 DEBUG=false
+PLATFORM=""
 
 if [[ "${1:-}" == "clean" ]]; then
     COMMAND="clean"
@@ -39,11 +40,29 @@ while [[ $# -gt 0 ]]; do
             VERSION="$2"
             shift 2
             ;;
+        --platform)
+            PLATFORM="$2"
+            shift 2
+            ;;
         *)
             break
             ;;
     esac
 done
+
+# Auto-detect platform if not specified
+if [ -z "$PLATFORM" ]; then
+    case "$(uname -s)" in
+        Linux*)  PLATFORM="linux" ;;
+        MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
+        *)       PLATFORM="linux" ;;
+    esac
+fi
+
+if [[ "$PLATFORM" != "linux" && "$PLATFORM" != "windows" ]]; then
+    echo -e "${RED}✗ Unknown platform: $PLATFORM (use 'linux' or 'windows')${NC}"
+    exit 1
+fi
 
 # Default values
 VERSION="${VERSION:-}"
@@ -54,6 +73,7 @@ APP_TITLE="ov2n - VPN Client"
 MAINTAINER="Alfiy <13012648@qq.com>"
 BUILD_DIR="build"
 DEB_BUILD_DIR="${BUILD_DIR}/deb"
+WIN_BUILD_DIR="${BUILD_DIR}/windows"
 DIST_DIR="dist"
 
 ########################################
@@ -102,8 +122,216 @@ echo "╚═══════════════════════�
 echo -e "${NC}"
 echo ""
 echo -e "${BLUE}Version:${NC} $VERSION"
+echo -e "${BLUE}Platform:${NC} $PLATFORM"
 echo -e "${BLUE}Distribution:${NC} $DISTRO"
 echo ""
+
+########################################
+# Windows build path
+########################################
+if [ "$PLATFORM" = "windows" ]; then
+    build_windows() {
+        echo -e "${YELLOW}[1/5] Checking source files...${NC}"
+        if [ ! -f "main.py" ]; then
+            echo -e "${RED}✗ main.py not found${NC}"; exit 1
+        fi
+        echo -e "${GREEN}  ✓ main.py found${NC}"
+        echo ""
+
+        echo -e "${YELLOW}[2/5] Preparing Windows build directory...${NC}"
+        rm -rf "${WIN_BUILD_DIR}"
+        local APP_DIR="${WIN_BUILD_DIR}/${PKG_NAME}"
+        mkdir -p "${APP_DIR}"
+        mkdir -p "${APP_DIR}/resources/images"
+        mkdir -p "${APP_DIR}/resources/v2ray"
+        mkdir -p "${APP_DIR}/resources/tap-windows"
+        mkdir -p "${APP_DIR}/service"
+        mkdir -p "${APP_DIR}/logs"
+        mkdir -p "${DIST_DIR}"
+        echo -e "${GREEN}  ✓ Directories prepared${NC}"
+        echo ""
+
+        echo -e "${YELLOW}[3/5] Copying application files...${NC}"
+        cp main.py "${APP_DIR}/"
+        cp requirements.txt "${APP_DIR}/"
+        echo "${VERSION}" > "${APP_DIR}/version.txt"
+
+        # 复制 Python 源码（排除 Linux 专有文件）
+        if [ -d "core" ]; then
+            cp -r core "${APP_DIR}/"
+            # 移除 Linux 专有的 polkit_helper（Windows 不需要）
+            # 保留文件但不影响运行，平台层会自动选择 Windows 实现
+            echo -e "${GREEN}  ✓ core/ copied${NC}"
+        fi
+        if [ -d "ui" ]; then
+            cp -r ui "${APP_DIR}/"
+            echo -e "${GREEN}  ✓ ui/ copied${NC}"
+        fi
+
+        # 图标资源
+        if [ -d "resources/images" ]; then
+            cp resources/images/* "${APP_DIR}/resources/images/" 2>/dev/null || true
+            echo -e "${GREEN}  ✓ resources/images/ copied${NC}"
+        fi
+
+        # V2Ray 二进制和 geo 文件（Windows 版需要 .exe）
+        if [ -d "resources/v2ray" ]; then
+            for f in resources/v2ray/geoip.dat resources/v2ray/geosite.dat; do
+                [ -f "$f" ] && cp "$f" "${APP_DIR}/resources/v2ray/"
+            done
+            # 提示用户放置 Windows 版 v2ray
+            if [ ! -f "resources/v2ray/v2ray.exe" ] && [ ! -f "resources/v2ray/xray.exe" ]; then
+                echo -e "${YELLOW}  ⚠ v2ray.exe/xray.exe not found in resources/v2ray/${NC}"
+                echo -e "${YELLOW}    请下载 Windows 版: https://github.com/XTLS/Xray-core/releases${NC}"
+                echo -e "${YELLOW}    将 xray.exe 放入 resources/v2ray/ 后重新构建${NC}"
+            else
+                cp resources/v2ray/*.exe "${APP_DIR}/resources/v2ray/" 2>/dev/null || true
+                echo -e "${GREEN}  ✓ v2ray/xray Windows binary copied${NC}"
+            fi
+            echo -e "${GREEN}  ✓ resources/v2ray/ geo files copied${NC}"
+        fi
+
+        # TAP 驱动
+        if [ -d "resources/tap-windows" ]; then
+            cp -r resources/tap-windows/* "${APP_DIR}/resources/tap-windows/" 2>/dev/null || true
+            echo -e "${GREEN}  ✓ resources/tap-windows/ copied${NC}"
+        fi
+
+        # Service 设计文档
+        if [ -d "service" ]; then
+            cp -r service/* "${APP_DIR}/service/" 2>/dev/null || true
+        fi
+
+        # 文档
+        for doc in README.md INSTALL.md LICENSE LICENSE.md; do
+            [ -f "$doc" ] && cp "$doc" "${APP_DIR}/" 2>/dev/null || true
+        done
+        echo -e "${GREEN}  ✓ Application files copied${NC}"
+        echo ""
+
+        # 创建 Windows 启动脚本
+        echo -e "${YELLOW}[4/5] Creating Windows launcher...${NC}"
+        cat > "${APP_DIR}/ov2n.bat" << 'WINLAUNCHER'
+@echo off
+REM ov2n - VPN Client Launcher for Windows
+REM Requires: Python 3.8+ with PyQt5
+
+setlocal
+
+REM Try to find python
+where python >nul 2>&1
+if %ERRORLEVEL% EQU 0 (
+    set PYTHON=python
+    goto :check_pyqt5
+)
+where python3 >nul 2>&1
+if %ERRORLEVEL% EQU 0 (
+    set PYTHON=python3
+    goto :check_pyqt5
+)
+echo [ERROR] Python not found. Please install Python 3.8+ from https://www.python.org/
+pause
+exit /b 1
+
+:check_pyqt5
+%PYTHON% -c "import PyQt5" >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] PyQt5 not found, installing...
+    %PYTHON% -m pip install PyQt5
+)
+
+REM Launch application
+cd /d "%~dp0"
+set PYTHONPATH=%~dp0;%PYTHONPATH%
+%PYTHON% main.py %*
+WINLAUNCHER
+        echo -e "${GREEN}  ✓ ov2n.bat created${NC}"
+
+        # 创建 PowerShell 启动脚本（备选）
+        cat > "${APP_DIR}/ov2n.ps1" << 'PSLAUNCHER'
+# ov2n - VPN Client Launcher for Windows (PowerShell)
+$ErrorActionPreference = "Stop"
+$AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# Find Python
+$python = $null
+foreach ($cmd in @("python", "python3")) {
+    try {
+        $null = & $cmd --version 2>&1
+        $python = $cmd
+        break
+    } catch {}
+}
+if (-not $python) {
+    Write-Error "Python not found. Please install Python 3.8+ from https://www.python.org/"
+    Read-Host "Press Enter to exit"
+    exit 1
+}
+
+# Check PyQt5
+try { & $python -c "import PyQt5" 2>$null } catch {
+    Write-Host "Installing PyQt5..." -ForegroundColor Yellow
+    & $python -m pip install PyQt5
+}
+
+# Launch
+Set-Location $AppDir
+$env:PYTHONPATH = "$AppDir;$env:PYTHONPATH"
+& $python "$AppDir\main.py" $args
+PSLAUNCHER
+        echo -e "${GREEN}  ✓ ov2n.ps1 created${NC}"
+        echo ""
+
+        # 打包为 ZIP
+        echo -e "${YELLOW}[5/5] Creating ZIP package...${NC}"
+        local ZIP_FILE="${DIST_DIR}/${PKG_NAME}_${VERSION}_windows.zip"
+
+        if command -v zip &>/dev/null; then
+            (cd "${WIN_BUILD_DIR}" && zip -r "../../${ZIP_FILE}" "${PKG_NAME}/")
+        elif command -v 7z &>/dev/null; then
+            (cd "${WIN_BUILD_DIR}" && 7z a "../../${ZIP_FILE}" "${PKG_NAME}/")
+        else
+            # tar.gz fallback
+            ZIP_FILE="${DIST_DIR}/${PKG_NAME}_${VERSION}_windows.tar.gz"
+            (cd "${WIN_BUILD_DIR}" && tar czf "../../${ZIP_FILE}" "${PKG_NAME}/")
+            echo -e "${YELLOW}  ⚠ zip/7z not found, created tar.gz instead${NC}"
+        fi
+
+        local SIZE=$(du -h "${ZIP_FILE}" | cut -f1)
+        echo -e "${GREEN}  ✓ Package created: ${ZIP_FILE} (${SIZE})${NC}"
+        echo ""
+
+        echo -e "${BLUE}═══════════════════════════════════════${NC}"
+        echo -e "${GREEN}Windows Build Instructions:${NC}"
+        echo -e "${BLUE}═══════════════════════════════════════${NC}"
+        echo ""
+        echo "  1. Copy ${ZIP_FILE} to Windows machine"
+        echo "  2. Extract the archive"
+        echo "  3. Install prerequisites:"
+        echo "     - Python 3.8+: https://www.python.org/"
+        echo "     - OpenVPN + TAP driver: https://openvpn.net/"
+        echo "     - Xray-core: https://github.com/XTLS/Xray-core/releases"
+        echo "  4. Run: ov2n.bat  (or: python main.py)"
+        echo ""
+        echo -e "${YELLOW}  NOTE: Windows adaptation is in progress.${NC}"
+        echo -e "${YELLOW}  The platform abstraction layer (core/platform/windows/) ${NC}"
+        echo -e "${YELLOW}  contains stub implementations that need to be completed.${NC}"
+        echo ""
+    }
+
+    build_windows
+    echo -e "${BLUE}"
+    echo "╔════════════════════════════════════════╗"
+    echo "         Build Completed! (Windows)       "
+    echo "       ov2n ${VERSION} is ready             "
+    echo "╚════════════════════════════════════════╝"
+    echo -e "${NC}"
+    exit 0
+fi
+
+# ========================================================
+# Linux build path (original logic below)
+# ========================================================
 
 # Step 1: Check dependencies
 echo -e "${YELLOW}[1/9] Checking dependencies...${NC}"
@@ -392,7 +620,7 @@ export QT_API=pyqt5
 export PYTHONPATH="$APP_DIR:${PYTHONPATH:-}"
 
 # 【关键修复】直接用 main.py 文件启动，而非 -c 参数
-# 使用 -c 启动时 WM_CLASS 会变成 ("-c", "Ov2n Client")，
+# 使用 -c 启动时 WM_CLASS 会变成 ("-c", "VPN Client")，
 # 导致 GNOME 无法通过 StartupWMClass=ov2n 匹配 .desktop 文件，
 # 从而标题栏无图标、Dock 图标也不正确。
 # 直接传文件路径，sys.argv[0] = "main.py"，WM_CLASS 由 Qt 内部正确设置。
@@ -410,7 +638,7 @@ cat > "${DEB_BUILD_DIR}/usr/share/applications/${PKG_NAME}.desktop" << DESKTOP
 [Desktop Entry]
 Type=Application
 Name=ov2n
-GenericName=Ov2n Client
+GenericName=VPN Client
 Comment=Integrated OpenVPN and V2Ray/Xray Client
 Exec=${PKG_NAME}
 Icon=${PKG_NAME}
@@ -946,7 +1174,7 @@ fi
 echo -e "${BLUE}"
 echo "╔════════════════════════════════════════╗"
 echo "         Build Completed!                 "
-echo "       ov2n v${VERSION} is ready           "
+echo "       ov2n ${VERSION} is ready             "
 echo "╚════════════════════════════════════════╝"
 echo -e "${NC}"
 

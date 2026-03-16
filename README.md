@@ -110,6 +110,19 @@ python3 main.py
 # 调试模式
 ./build.sh debug
 
+# 自动检测平台
+./build.sh
+
+# 显式指定平台
+./build.sh --platform linux
+./build.sh --platform windows
+./build.sh --platform windows --version 1.4.0
+
+# 组合使用
+./build.sh rebuild --platform windows --debug
+./build.sh clean
+
+
 ```
 ## 工作原理
 

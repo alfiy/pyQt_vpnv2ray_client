@@ -17,10 +17,11 @@ icon_helper.py
   若不同 → emoji 被正确渲染 → 支持。
 """
 import os
+import sys
 from typing import Optional
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QStyle, QApplication
 from PyQt5.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QPainterPath
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QSize
 from Xlib import display as xdisplay, Xatom
 
 # ──────────────────────────────────────────────
