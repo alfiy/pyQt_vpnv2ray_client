@@ -7,8 +7,13 @@
 1. 用 icon_helper.btn_text() 替换所有硬编码 emoji
 2. 用 icon_helper.load_window_icon() 多路径探测窗口图标
 3. 按钮状态统一由 _refresh_buttons() 管理
+4. Windows 停止操作改用 WindowsPrivilegeHandler，不再依赖 pkexec
+5. edit_v2ray_config 支持 Windows（os.startfile）
+6. 联合启动允许只有单侧配置（Windows 独立启动设计）
+7. success_signal 兼容 Windows 服务模式（pid=1 表示服务运行）
 """
 import os
+import platform
 import subprocess
 
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent
@@ -25,7 +30,6 @@ from core.config_manager import (
     load_tproxy_config, save_tproxy_config,
     extract_tproxy_config_from_v2ray, init_config_files,
 )
-from core.polkit_helper import PolkitHelper
 from core.utils import get_app_root, validate_ip
 from core.worker import SingleVPNThread, SingleV2RayThread, CombinedStartThread
 from core.icon_helper import (
@@ -40,6 +44,17 @@ from ui.styles import (
     readonly_spinbox_style, editable_spinbox_style,
 )
 
+IS_WINDOWS = platform.system() == "Windows"
+
+# Linux 专用导入
+if not IS_WINDOWS:
+    from core.polkit_helper import PolkitHelper
+
+
+def _get_windows_handler():
+    from core.platform.windows.privilege import WindowsPrivilegeHandler
+    return WindowsPrivilegeHandler()
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -49,6 +64,9 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         # ── 运行状态 ──────────────────────────────
+        # Windows 服务模式：vpn_pid=1 表示 OV2NService 运行中（无真实 PID）
+        #                   v2ray_pid=1 表示 xray 进程运行中
+        # Linux：存储真实 PID
         self.vpn_pid = None
         self.v2ray_pid = None
         self.tproxy_active = False
@@ -65,6 +83,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
 
         # ── 配置路径 & 初始化 ─────────────────────
+        # 首次运行：imported_flags 均为 False，路径为默认空值
+        # 再次运行：从持久化存储恢复上次的路径和导入状态
         flags = load_imported_flags()
         self.vpn_config_imported = flags['vpn']
         self.v2ray_config_imported = flags['v2ray']
@@ -79,6 +99,7 @@ class MainWindow(QMainWindow):
         self._refresh_buttons()
 
         print(f"[ov2n] emoji 支持: {emoji_supported()}")
+        print(f"[ov2n] 平台: {'Windows' if IS_WINDOWS else 'Linux'}")
 
     # ══════════════════════════════════════════
     # UI 构建
@@ -201,6 +222,10 @@ class MainWindow(QMainWindow):
         self._toggle_tproxy_inputs(self.tproxy_checkbox.isChecked())
         self.tproxy_checkbox.toggled.connect(self._toggle_tproxy_inputs)
 
+        # Windows 上 TProxy 不适用，隐藏整个分组
+        if IS_WINDOWS:
+            self.tproxy_group.setVisible(False)
+
         # ── 底部联合按钮 ───────────────────────────
         self.start_all_button = QPushButton(btn_text("start", "启动 VPN + V2Ray"))
         self.start_all_button.setStyleSheet(btn_green_style(large=True))
@@ -230,10 +255,6 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════
 
     def _refresh_buttons(self, starting: bool = False):
-        """
-        根据当前运行状态统一刷新所有按钮的启用/禁用。
-        starting=True 表示正在启动中，所有启动按钮临时禁用。
-        """
         vpn_running = bool(self.vpn_pid)
         v2ray_running = bool(self.v2ray_pid)
         both_running = vpn_running and v2ray_running
@@ -251,7 +272,6 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════
 
     def _update_config_display(self):
-        """根据导入状态更新拖拽区域的显示文本和样式。"""
         cm = check_mark()
         dp = drop_area_prefix()
 
@@ -271,7 +291,6 @@ class MainWindow(QMainWindow):
             self.v2ray_drop_area.setStyleSheet(drop_area_empty_style())
 
     def _auto_extract_tproxy_config(self):
-        """从 V2Ray 配置自动提取 TProxy 参数并更新 UI。"""
         if not os.path.exists(self.v2ray_config_path):
             return
         extracted = extract_tproxy_config_from_v2ray(self.v2ray_config_path)
@@ -284,7 +303,6 @@ class MainWindow(QMainWindow):
                 self.mark_input.value(), self.table_input.value())
 
     def _toggle_tproxy_inputs(self, enabled: bool):
-        """切换 TProxy 相关输入框的启用状态。"""
         self.mark_input.setEnabled(enabled)
         self.table_input.setEnabled(enabled)
 
@@ -293,7 +311,6 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════
 
     def _check_vpn_ready(self) -> bool:
-        """检查 VPN 配置是否已导入且文件存在。"""
         if not self.vpn_config_imported or not os.path.exists(self.vpn_config_path):
             QMessageBox.warning(self, "未导入 VPN 配置",
                 "请先导入 OpenVPN 配置文件 (.ovpn)。\n\n"
@@ -304,7 +321,6 @@ class MainWindow(QMainWindow):
         return True
 
     def _check_v2ray_ready(self) -> bool:
-        """检查 V2Ray 配置是否已导入且文件存在。"""
         if not self.v2ray_config_imported or not os.path.exists(self.v2ray_config_path):
             QMessageBox.warning(self, "未导入 V2Ray 配置",
                 "请先导入 V2Ray/Shadowsocks 配置。\n\n"
@@ -316,7 +332,9 @@ class MainWindow(QMainWindow):
         return True
 
     def _validate_tproxy_params(self) -> bool:
-        """验证 TProxy 参数（启用时检查 VPS IP）。"""
+        """Windows 上 TProxy 不适用，始终返回 True。"""
+        if IS_WINDOWS:
+            return True
         if not self.tproxy_checkbox.isChecked():
             return True
         vps_ip = self.vps_ip_input.text().strip()
@@ -327,9 +345,8 @@ class MainWindow(QMainWindow):
         return True
 
     def _get_tproxy_params(self) -> dict:
-        """收集当前 TProxy 参数为字典。"""
         return {
-            'tproxy_enabled': self.tproxy_checkbox.isChecked(),
+            'tproxy_enabled': self.tproxy_checkbox.isChecked() and not IS_WINDOWS,
             'tproxy_port': self.tproxy_port_input.value(),
             'tproxy_vps_ip': self.vps_ip_input.text().strip(),
             'tproxy_mark': self.mark_input.value(),
@@ -341,7 +358,6 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════
 
     def _on_vpn_config_imported(self, path: str):
-        """VPN 配置导入后的统一处理。"""
         self.vpn_config_path = path
         self.vpn_config_imported = True
         save_imported_flags(self.vpn_config_imported, self.v2ray_config_imported)
@@ -350,7 +366,6 @@ class MainWindow(QMainWindow):
         save_config_paths(self.vpn_config_path, self.v2ray_config_path)
 
     def _on_v2ray_config_imported(self, path: str):
-        """V2Ray 配置导入后的统一处理。"""
         self.v2ray_config_path = path
         self.v2ray_config_imported = True
         save_imported_flags(self.vpn_config_imported, self.v2ray_config_imported)
@@ -368,7 +383,6 @@ class MainWindow(QMainWindow):
         if not urls:
             return
         path = urls[0].toLocalFile()
-
         if path.endswith('.ovpn'):
             self._on_vpn_config_imported(path)
             QMessageBox.information(
@@ -425,7 +439,10 @@ class MainWindow(QMainWindow):
                 return
             V2RayConfigManager(self.v2ray_config_path).save_config()
         try:
-            subprocess.Popen(["xdg-open", self.v2ray_config_path])
+            if IS_WINDOWS:
+                os.startfile(self.v2ray_config_path)   # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["xdg-open", self.v2ray_config_path])
             QMessageBox.information(
                 self, "提示",
                 "配置文件已在外部编辑器中打开。\n编辑完成后请重启 V2Ray 以应用更改。")
@@ -463,9 +480,16 @@ class MainWindow(QMainWindow):
         self._vpn_thread.success_signal.connect(self._on_vpn_started)
         self._vpn_thread.start()
 
-    def _on_vpn_started(self, pid: int):
-        self.vpn_pid = pid
-        self._set_vpn_status(f"✓ 已连接 (PID: {pid})", "#4CAF50")
+    def _on_vpn_started(self, ok):
+        """
+        Windows: success_signal 发送 bool(True)，服务模式用 1 作为占位 pid
+        Linux:   success_signal 发送 bool(True)，同样用 1（已统一为 bool）
+        """
+        self.vpn_pid = 1   # 服务模式统一用 1 表示运行中
+        if IS_WINDOWS:
+            self._set_vpn_status("✓ 服务运行中 (OV2NService)", "#4CAF50")
+        else:
+            self._set_vpn_status("✓ 已连接", "#4CAF50")
         self._refresh_buttons()
 
     def _on_vpn_error(self, err: str):
@@ -478,6 +502,28 @@ class MainWindow(QMainWindow):
             return
         self.stop_vpn_button.setEnabled(False)
         self._set_vpn_status("正在停止...", "#FF9800")
+        if IS_WINDOWS:
+            self._stop_vpn_windows()
+        else:
+            self._stop_vpn_linux()
+
+    def _stop_vpn_windows(self):
+        try:
+            handler = _get_windows_handler()
+            ok, msg = handler.stop_openvpn()
+            if ok:
+                self.vpn_pid = None
+                self._set_vpn_status("未连接", "#999")
+                self._refresh_buttons()
+                QMessageBox.information(self, "成功", "OpenVPN 已停止")
+            else:
+                self._refresh_buttons()
+                QMessageBox.critical(self, "错误", f"停止失败: {msg}")
+        except Exception as e:
+            self._refresh_buttons()
+            QMessageBox.critical(self, "错误", f"停止失败: {e}")
+
+    def _stop_vpn_linux(self):
         try:
             r = subprocess.run(
                 ["pkexec", PolkitHelper.HELPER_SCRIPT,
@@ -518,11 +564,15 @@ class MainWindow(QMainWindow):
         self._v2ray_thread.start()
 
     def _on_v2ray_started(self, result: dict):
-        self.v2ray_pid = result['pid']
-        self.tproxy_active = result['tproxy_ok']
-        suffix = " + TProxy" if result['tproxy_ok'] else ""
-        self._set_v2ray_status(
-            f"✓ 已连接{suffix} (PID: {result['pid']})", "#4CAF50")
+        # Windows: pid=0 (服务模式)，用 1 占位表示运行中
+        pid = result['pid'] or 1
+        self.v2ray_pid = pid
+        self.tproxy_active = result.get('tproxy_ok', False)
+        if IS_WINDOWS:
+            self._set_v2ray_status("✓ Xray 运行中 (TUN)", "#4CAF50")
+        else:
+            suffix = " + TProxy" if self.tproxy_active else ""
+            self._set_v2ray_status(f"✓ 已连接{suffix} (PID: {pid})", "#4CAF50")
         self._refresh_buttons()
 
     def _on_v2ray_error(self, err: str):
@@ -535,6 +585,28 @@ class MainWindow(QMainWindow):
             return
         self.stop_v2ray_button.setEnabled(False)
         self._set_v2ray_status("正在停止...", "#FF9800")
+        if IS_WINDOWS:
+            self._stop_v2ray_windows()
+        else:
+            self._stop_v2ray_linux()
+
+    def _stop_v2ray_windows(self):
+        try:
+            handler = _get_windows_handler()
+            ok, msg = handler.stop_xray()
+            if ok:
+                self.v2ray_pid = None
+                self._set_v2ray_status("未连接", "#999")
+                self._refresh_buttons()
+                QMessageBox.information(self, "成功", "Xray 已停止")
+            else:
+                self._refresh_buttons()
+                QMessageBox.critical(self, "错误", f"停止失败: {msg}")
+        except Exception as e:
+            self._refresh_buttons()
+            QMessageBox.critical(self, "错误", f"停止失败: {e}")
+
+    def _stop_v2ray_linux(self):
         try:
             if self.tproxy_active:
                 PolkitHelper.stop_tproxy(
@@ -564,17 +636,37 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════
 
     def start_combined(self):
-        if not self._check_vpn_ready() or not self._check_v2ray_ready():
-            return
-        if not self._validate_tproxy_params():
-            return
+        """
+        Linux: 两侧配置都必须就绪。
+        Windows: 至少有一侧配置即可（独立启动设计）。
+        """
+        if IS_WINDOWS:
+            # Windows：有哪个配置就启动哪个，两者都没有才报错
+            vpn_ready = (self.vpn_config_imported
+                         and os.path.exists(self.vpn_config_path))
+            v2ray_ready = (self.v2ray_config_imported
+                           and os.path.exists(self.v2ray_config_path))
+            if not vpn_ready and not v2ray_ready:
+                QMessageBox.warning(self, "未导入配置",
+                    "请至少导入一个配置文件：\n"
+                    "• OpenVPN 配置 (.ovpn)\n"
+                    "• V2Ray/Xray 配置 (config.json)")
+                return
+        else:
+            if not self._check_vpn_ready() or not self._check_v2ray_ready():
+                return
+            if not self._validate_tproxy_params():
+                return
+
         tproxy_params = self._get_tproxy_params()
-        save_tproxy_config(
-            tproxy_params['tproxy_enabled'],
-            tproxy_params['tproxy_vps_ip'],
-            tproxy_params['tproxy_port'],
-            tproxy_params['tproxy_mark'],
-            tproxy_params['tproxy_table'])
+        if not IS_WINDOWS:
+            save_tproxy_config(
+                tproxy_params['tproxy_enabled'],
+                tproxy_params['tproxy_vps_ip'],
+                tproxy_params['tproxy_port'],
+                tproxy_params['tproxy_mark'],
+                tproxy_params['tproxy_table'])
+
         self._refresh_buttons(starting=True)
         self._combined_thread = CombinedStartThread(
             self.vpn_config_path, self.v2ray_config_path,
@@ -588,22 +680,46 @@ class MainWindow(QMainWindow):
     def _on_combined_update(self, msg: str):
         if "OpenVPN" in msg:
             self._set_vpn_status(msg, "#FF9800")
-        elif "V2Ray" in msg:
+        elif "V2Ray" in msg or "Xray" in msg:
             self._set_v2ray_status(msg, "#FF9800")
 
     def _on_combined_started(self, result: dict):
-        self.vpn_pid = result['vpn_pid']
-        self.v2ray_pid = result['v2ray_pid']
-        self.tproxy_active = result['tproxy_ok']
-        if self.vpn_pid:
-            self._set_vpn_status(
-                f"✓ 已连接 (PID: {self.vpn_pid})", "#4CAF50")
-        if self.v2ray_pid:
-            suffix = " + TProxy" if self.tproxy_active else ""
-            self._set_v2ray_status(
-                f"✓ 已连接{suffix} (PID: {self.v2ray_pid})", "#4CAF50")
+        vpn_pid = result.get('vpn_pid', 0)
+        v2ray_pid = result.get('v2ray_pid', 0)
+        warnings = result.get('warnings', [])
+
+        if vpn_pid:
+            self.vpn_pid = vpn_pid
+            if IS_WINDOWS:
+                self._set_vpn_status("✓ 服务运行中 (OV2NService)", "#4CAF50")
+            else:
+                self._set_vpn_status(f"✓ 已连接 (PID: {vpn_pid})", "#4CAF50")
+
+        if v2ray_pid:
+            self.v2ray_pid = v2ray_pid
+            self.tproxy_active = result.get('tproxy_ok', False)
+            if IS_WINDOWS:
+                self._set_v2ray_status("✓ Xray 运行中 (TUN)", "#4CAF50")
+            else:
+                suffix = " + TProxy" if self.tproxy_active else ""
+                self._set_v2ray_status(
+                    f"✓ 已连接{suffix} (PID: {v2ray_pid})", "#4CAF50")
+
         self._refresh_buttons()
-        QMessageBox.information(self, "成功", "VPN + V2Ray 已启动")
+
+        # 部分失败时显示警告，不阻断成功流程
+        if warnings:
+            QMessageBox.warning(self, "部分启动失败",
+                "以下服务启动失败，其他服务已正常启动：\n\n"
+                + "\n".join(f"• {w}" for w in warnings))
+        else:
+            started = []
+            if vpn_pid:
+                started.append("OpenVPN")
+            if v2ray_pid:
+                started.append("V2Ray/Xray")
+            QMessageBox.information(self, "成功",
+                " + ".join(started) + " 已启动")
 
     def _on_combined_error(self, err: str):
         self._refresh_buttons()
@@ -614,6 +730,45 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "没有运行中的服务")
             return
         self.stop_all_button.setEnabled(False)
+        if IS_WINDOWS:
+            self._stop_combined_windows()
+        else:
+            self._stop_combined_linux()
+
+    def _stop_combined_windows(self):
+        try:
+            handler = _get_windows_handler()
+            errors = []
+
+            if self.v2ray_pid:
+                self._set_v2ray_status("正在停止...", "#FF9800")
+                ok, msg = handler.stop_xray()
+                if ok:
+                    self.v2ray_pid = None
+                    self._set_v2ray_status("未连接", "#999")
+                else:
+                    errors.append(f"Xray: {msg}")
+
+            if self.vpn_pid:
+                self._set_vpn_status("正在停止...", "#FF9800")
+                ok, msg = handler.stop_openvpn()
+                if ok:
+                    self.vpn_pid = None
+                    self._set_vpn_status("未连接", "#999")
+                else:
+                    errors.append(f"OpenVPN: {msg}")
+
+            self._refresh_buttons()
+            if errors:
+                QMessageBox.critical(self, "错误",
+                    "部分服务停止失败：\n" + "\n".join(f"• {e}" for e in errors))
+            else:
+                QMessageBox.information(self, "成功", "所有服务已停止")
+        except Exception as e:
+            self._refresh_buttons()
+            QMessageBox.critical(self, "错误", f"停止失败: {e}")
+
+    def _stop_combined_linux(self):
         try:
             if self.tproxy_active:
                 PolkitHelper.stop_tproxy(
@@ -651,7 +806,6 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════
 
     def showEvent(self, event):
-        """窗口显示后强制刷新图标到底层窗口系统。"""
         super().showEvent(event)
         QTimer.singleShot(100, lambda: apply_window_icon(self))
 

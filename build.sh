@@ -131,40 +131,45 @@ echo ""
 ########################################
 if [ "$PLATFORM" = "windows" ]; then
     build_windows() {
-        echo -e "${YELLOW}[1/5] Checking source files...${NC}"
+        echo -e "${YELLOW}[1/7] Checking source files...${NC}"
         if [ ! -f "main.py" ]; then
             echo -e "${RED}✗ main.py not found${NC}"; exit 1
         fi
         echo -e "${GREEN}  ✓ main.py found${NC}"
         echo ""
 
-        echo -e "${YELLOW}[2/5] Preparing Windows build directory...${NC}"
+        echo -e "${YELLOW}[2/7] Preparing Windows build directory...${NC}"
         rm -rf "${WIN_BUILD_DIR}"
         local APP_DIR="${WIN_BUILD_DIR}/${PKG_NAME}"
         mkdir -p "${APP_DIR}"
         mkdir -p "${APP_DIR}/resources/images"
-        mkdir -p "${APP_DIR}/resources/v2ray"
+        mkdir -p "${APP_DIR}/resources/xray"
+        mkdir -p "${APP_DIR}/resources/openvpn/bin"
+        mkdir -p "${APP_DIR}/resources/openvpn/config"
+        mkdir -p "${APP_DIR}/resources/openvpn/log"
         mkdir -p "${APP_DIR}/resources/tap-windows"
-        mkdir -p "${APP_DIR}/service"
+        mkdir -p "${APP_DIR}/resources/nssm"
+        mkdir -p "${APP_DIR}/scripts/windows"
         mkdir -p "${APP_DIR}/logs"
         mkdir -p "${DIST_DIR}"
         echo -e "${GREEN}  ✓ Directories prepared${NC}"
         echo ""
 
-        echo -e "${YELLOW}[3/5] Copying application files...${NC}"
+        echo -e "${YELLOW}[3/7] Copying application files...${NC}"
         cp main.py "${APP_DIR}/"
         cp requirements.txt "${APP_DIR}/"
         echo "${VERSION}" > "${APP_DIR}/version.txt"
 
-        # 复制 Python 源码（排除 Linux 专有文件）
+        # 复制 Python 源码
         if [ -d "core" ]; then
             cp -r core "${APP_DIR}/"
-            # 移除 Linux 专有的 polkit_helper（Windows 不需要）
-            # 保留文件但不影响运行，平台层会自动选择 Windows 实现
-            echo -e "${GREEN}  ✓ core/ copied${NC}"
+            # 清理 __pycache__
+            find "${APP_DIR}/core" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+            echo -e "${GREEN}  ✓ core/ copied (with platform/windows/ implementations)${NC}"
         fi
         if [ -d "ui" ]; then
             cp -r ui "${APP_DIR}/"
+            find "${APP_DIR}/ui" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
             echo -e "${GREEN}  ✓ ui/ copied${NC}"
         fi
 
@@ -174,80 +179,222 @@ if [ "$PLATFORM" = "windows" ]; then
             echo -e "${GREEN}  ✓ resources/images/ copied${NC}"
         fi
 
-        # V2Ray 二进制和 geo 文件（Windows 版需要 .exe）
-        if [ -d "resources/v2ray" ]; then
-            for f in resources/v2ray/geoip.dat resources/v2ray/geosite.dat; do
-                [ -f "$f" ] && cp "$f" "${APP_DIR}/resources/v2ray/"
+        # Xray 资源（Windows 版使用 resources/xray/ 目录）
+        echo ""
+        echo -e "${YELLOW}  Checking Xray resources...${NC}"
+
+        # 批量复制 resources/xray/ 下所有文件
+        if [ -d "resources/xray" ]; then
+            for f in resources/xray/*; do
+                [ -f "$f" ] && cp "$f" "${APP_DIR}/resources/xray/" 2>/dev/null || true
             done
-            # 提示用户放置 Windows 版 v2ray
-            if [ ! -f "resources/v2ray/v2ray.exe" ] && [ ! -f "resources/v2ray/xray.exe" ]; then
-                echo -e "${YELLOW}  ⚠ v2ray.exe/xray.exe not found in resources/v2ray/${NC}"
-                echo -e "${YELLOW}    请下载 Windows 版: https://github.com/XTLS/Xray-core/releases${NC}"
-                echo -e "${YELLOW}    将 xray.exe 放入 resources/v2ray/ 后重新构建${NC}"
-            else
-                cp resources/v2ray/*.exe "${APP_DIR}/resources/v2ray/" 2>/dev/null || true
-                echo -e "${GREEN}  ✓ v2ray/xray Windows binary copied${NC}"
-            fi
-            echo -e "${GREEN}  ✓ resources/v2ray/ geo files copied${NC}"
         fi
 
-        # TAP 驱动
+        # geo 文件（如果 resources/xray/ 没有，则从 resources/v2ray/ 补充）
+        for geo_file in geoip.dat geosite.dat; do
+            if [ ! -f "${APP_DIR}/resources/xray/${geo_file}" ]; then
+                [ -f "resources/v2ray/${geo_file}" ] && cp "resources/v2ray/${geo_file}" "${APP_DIR}/resources/xray/"
+            fi
+            if [ -f "${APP_DIR}/resources/xray/${geo_file}" ]; then
+                geo_size=$(stat -c%s "${APP_DIR}/resources/xray/${geo_file}" 2>/dev/null || echo "0")
+                echo -e "${GREEN}    ✓ ${geo_file} copied ($(numfmt --to=iec $geo_size 2>/dev/null || echo "${geo_size} bytes"))${NC}"
+            fi
+        done
+
+        # xray.exe 检查
+        local XRAY_BUNDLED=false
+        if [ -f "${APP_DIR}/resources/xray/xray.exe" ]; then
+            XRAY_BUNDLED=true
+            echo -e "${GREEN}    ✓ xray.exe bundled${NC}"
+        else
+            echo -e "${YELLOW}    ⚠ xray.exe not found${NC}"
+            echo -e "${YELLOW}      请下载: https://github.com/XTLS/Xray-core/releases${NC}"
+            echo -e "${YELLOW}      将 xray.exe 放入 resources/xray/ 后重新构建${NC}"
+        fi
+
+        # wintun.dll 检查
+        if [ -f "${APP_DIR}/resources/xray/wintun.dll" ]; then
+            echo -e "${GREEN}    ✓ wintun.dll bundled${NC}"
+        fi
+
+        # Xray 辅助脚本检查
+        for helper in xray_no_window.ps1 xray_no_window.vbs; do
+            [ -f "${APP_DIR}/resources/xray/${helper}" ] && echo -e "${GREEN}    ✓ ${helper} bundled${NC}"
+        done
+
+        # Xray 配置模板
+        if [ -f "${APP_DIR}/resources/xray/config.json.windows.template" ]; then
+            cp "${APP_DIR}/resources/xray/config.json.windows.template" "${APP_DIR}/resources/xray/config.json"
+            echo -e "${GREEN}    ✓ Xray config template applied${NC}"
+        elif [ -f "${APP_DIR}/resources/xray/config.json" ]; then
+            echo -e "${GREEN}    ✓ Xray config.json present${NC}"
+        fi
+
+        # TAP-Windows 驱动安装包
+        echo ""
+        echo -e "${YELLOW}  Checking TAP-Windows resources...${NC}"
         if [ -d "resources/tap-windows" ]; then
             cp -r resources/tap-windows/* "${APP_DIR}/resources/tap-windows/" 2>/dev/null || true
-            echo -e "${GREEN}  ✓ resources/tap-windows/ copied${NC}"
+            # 自动检测任何 TAP 安装程序 (.exe)
+            local TAP_FOUND=false
+            for tap_exe in "${APP_DIR}"/resources/tap-windows/*.exe; do
+                if [ -f "$tap_exe" ]; then
+                    TAP_FOUND=true
+                    echo -e "${GREEN}    ✓ TAP-Windows installer bundled: $(basename "$tap_exe")${NC}"
+                fi
+            done
+            if [ "$TAP_FOUND" = false ]; then
+                echo -e "${YELLOW}    ⚠ TAP-Windows installer (.exe) not found in resources/tap-windows/${NC}"
+                echo -e "${YELLOW}      请下载 TAP-Windows 安装包并放入 resources/tap-windows/${NC}"
+            fi
         fi
 
-        # Service 设计文档
-        if [ -d "service" ]; then
-            cp -r service/* "${APP_DIR}/service/" 2>/dev/null || true
+        # NSSM - 复制整个目录结构（含 win32/ win64/ 子目录）
+        echo ""
+        echo -e "${YELLOW}  Checking NSSM...${NC}"
+        if [ -d "resources/nssm" ]; then
+            cp -r resources/nssm/* "${APP_DIR}/resources/nssm/" 2>/dev/null || true
+            # 确保根目录有 nssm.exe（优先 win64）
+            if [ ! -f "${APP_DIR}/resources/nssm/nssm.exe" ]; then
+                if [ -f "${APP_DIR}/resources/nssm/win64/nssm.exe" ]; then
+                    cp "${APP_DIR}/resources/nssm/win64/nssm.exe" "${APP_DIR}/resources/nssm/nssm.exe"
+                elif [ -f "${APP_DIR}/resources/nssm/win32/nssm.exe" ]; then
+                    cp "${APP_DIR}/resources/nssm/win32/nssm.exe" "${APP_DIR}/resources/nssm/nssm.exe"
+                fi
+            fi
+        fi
+        if [ -f "${APP_DIR}/resources/nssm/nssm.exe" ]; then
+            echo -e "${GREEN}    ✓ nssm.exe bundled${NC}"
+            [ -f "${APP_DIR}/resources/nssm/win64/nssm.exe" ] && echo -e "${GREEN}    ✓ nssm/win64/nssm.exe bundled${NC}"
+            [ -f "${APP_DIR}/resources/nssm/win32/nssm.exe" ] && echo -e "${GREEN}    ✓ nssm/win32/nssm.exe bundled${NC}"
+        else
+            echo -e "${YELLOW}    ⚠ nssm.exe not found${NC}"
+            echo -e "${YELLOW}      请下载: https://nssm.cc/download${NC}"
+            echo -e "${YELLOW}      将 nssm.exe 放入 resources/nssm/${NC}"
+        fi
+
+        # OpenVPN 资源 - 复制整个目录（bin/config/include/log）
+        echo ""
+        echo -e "${YELLOW}  Checking OpenVPN resources...${NC}"
+        if [ -d "resources/openvpn" ]; then
+            for subdir in bin config include log; do
+                mkdir -p "${APP_DIR}/resources/openvpn/${subdir}" 2>/dev/null || true
+            done
+            cp -r resources/openvpn/* "${APP_DIR}/resources/openvpn/" 2>/dev/null || true
+            if [ -f "${APP_DIR}/resources/openvpn/bin/openvpn.exe" ]; then
+                echo -e "${GREEN}    ✓ OpenVPN files bundled${NC}"
+                local dll_count=$(ls "${APP_DIR}/resources/openvpn/bin/"*.dll 2>/dev/null | wc -l)
+                [ "$dll_count" -gt 0 ] && echo -e "${GREEN}    ✓ ${dll_count} DLL files bundled${NC}"
+            else
+                echo -e "${YELLOW}    ⚠ openvpn.exe not found in resources/openvpn/bin/${NC}"
+                echo -e "${YELLOW}      请安装 OpenVPN GUI 后将 bin/config/include/log 复制到 resources/openvpn/${NC}"
+            fi
+        else
+            echo -e "${YELLOW}    ⚠ resources/openvpn/ directory not found${NC}"
         fi
 
         # 文档
         for doc in README.md INSTALL.md LICENSE LICENSE.md; do
             [ -f "$doc" ] && cp "$doc" "${APP_DIR}/" 2>/dev/null || true
         done
+        echo ""
         echo -e "${GREEN}  ✓ Application files copied${NC}"
         echo ""
 
+        # 复制 Windows 脚本
+        echo -e "${YELLOW}[4/7] Copying Windows scripts...${NC}"
+        if [ -d "scripts/windows" ]; then
+            cp scripts/windows/*.ps1 "${APP_DIR}/scripts/windows/" 2>/dev/null || true
+            cp scripts/windows/*.bat "${APP_DIR}/scripts/windows/" 2>/dev/null || true
+            echo -e "${GREEN}  ✓ PowerShell scripts copied (start-xray.ps1, stop-xray.ps1)${NC}"
+            echo -e "${GREEN}  ✓ Batch scripts copied (install.bat, uninstall.bat, register-openvpn-service.bat)${NC}"
+        fi
+        echo ""
+
         # 创建 Windows 启动脚本
-        echo -e "${YELLOW}[4/5] Creating Windows launcher...${NC}"
+        echo -e "${YELLOW}[5/7] Creating Windows launcher...${NC}"
         cat > "${APP_DIR}/ov2n.bat" << 'WINLAUNCHER'
 @echo off
+chcp 65001 >nul 2>&1
+setlocal enabledelayedexpansion
+
+REM ==========================================
 REM ov2n - VPN Client Launcher for Windows
 REM Requires: Python 3.8+ with PyQt5
+REM ==========================================
 
-setlocal
+title ov2n VPN Client
 
 REM Try to find python
+set PYTHON=
 where python >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     set PYTHON=python
-    goto :check_pyqt5
+    goto :python_ok
 )
 where python3 >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     set PYTHON=python3
-    goto :check_pyqt5
+    goto :python_ok
 )
-echo [ERROR] Python not found. Please install Python 3.8+ from https://www.python.org/
+
+echo ==========================================
+echo   [ERROR] Python not found!
+echo ==========================================
+echo.
+echo   Please install Python 3.8+ from:
+echo   https://www.python.org/downloads/
+echo.
+echo   IMPORTANT: Check "Add Python to PATH"
+echo   during installation.
+echo.
+echo   After installing Python, run install-ov2n.bat
+echo   as Administrator to set up dependencies.
+echo.
 pause
 exit /b 1
 
-:check_pyqt5
-%PYTHON% -c "import PyQt5" >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo [WARN] PyQt5 not found, installing...
-    %PYTHON% -m pip install PyQt5
+:python_ok
+REM Check PyQt5
+!PYTHON! -c "import PyQt5" >nul 2>&1
+if !ERRORLEVEL! NEQ 0 (
+    echo [WARN] PyQt5 not found. Installing...
+    !PYTHON! -m pip install PyQt5
+    if !ERRORLEVEL! NEQ 0 (
+        echo.
+        echo [ERROR] Failed to install PyQt5.
+        echo Please run: pip install PyQt5
+        echo Or run install-ov2n.bat as Administrator.
+        echo.
+        pause
+        exit /b 1
+    )
 )
 
 REM Launch application
 cd /d "%~dp0"
 set PYTHONPATH=%~dp0;%PYTHONPATH%
-%PYTHON% main.py %*
+echo Starting ov2n VPN Client...
+!PYTHON! main.py %*
+
+REM If the application exits with an error, show it
+if !ERRORLEVEL! NEQ 0 (
+    echo.
+    echo ==========================================
+    echo   Application exited with error code: !ERRORLEVEL!
+    echo ==========================================
+    echo.
+    echo   If the GUI did not appear, try:
+    echo   1. Run install-ov2n.bat as Administrator
+    echo   2. Check that PyQt5 is installed: pip install PyQt5
+    echo   3. Check logs\ folder for error details
+    echo.
+    pause
+)
 WINLAUNCHER
         echo -e "${GREEN}  ✓ ov2n.bat created${NC}"
 
-        # 创建 PowerShell 启动脚本（备选）
+        # 创建 PowerShell 启动脚本
         cat > "${APP_DIR}/ov2n.ps1" << 'PSLAUNCHER'
 # ov2n - VPN Client Launcher for Windows (PowerShell)
 $ErrorActionPreference = "Stop"
@@ -282,8 +429,63 @@ PSLAUNCHER
         echo -e "${GREEN}  ✓ ov2n.ps1 created${NC}"
         echo ""
 
-        # 打包为 ZIP
-        echo -e "${YELLOW}[5/5] Creating ZIP package...${NC}"
+        # Create installer entry point scripts (root-level shortcuts)
+        echo -e "${YELLOW}[6/7] Creating installer entry point...${NC}"
+
+        # install-entry.bat (ASCII-safe, no Chinese in filename)
+        cat > "${APP_DIR}/install-ov2n.bat" << 'INSTALL_ENTRY'
+@echo off
+chcp 65001 >nul 2>&1
+REM ov2n - One-click installer (TAP driver + components)
+REM Requires Administrator privileges
+
+net session >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERROR] Please run as Administrator.
+    echo Right-click this file and select "Run as administrator"
+    pause
+    exit /b 1
+)
+
+cd /d "%~dp0"
+call scripts\windows\install.bat
+INSTALL_ENTRY
+        echo -e "${GREEN}  ✓ install-ov2n.bat created (installer entry point)${NC}"
+
+        cat > "${APP_DIR}/uninstall-ov2n.bat" << 'UNINSTALL_ENTRY'
+@echo off
+chcp 65001 >nul 2>&1
+REM ov2n - Uninstaller
+net session >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERROR] Please run as Administrator.
+    pause
+    exit /b 1
+)
+cd /d "%~dp0"
+call scripts\windows\uninstall.bat
+UNINSTALL_ENTRY
+        echo -e "${GREEN}  ✓ uninstall-ov2n.bat created (uninstaller entry point)${NC}"
+        echo ""
+
+        # Convert all .bat and .ps1 files to Windows CRLF line endings
+        echo -e "${YELLOW}[7/8] Converting scripts to Windows line endings (CRLF)...${NC}"
+        local crlf_count=0
+        while IFS= read -r -d '' batfile; do
+            if command -v unix2dos &>/dev/null; then
+                unix2dos -q "$batfile" 2>/dev/null
+            else
+                # sed-based CRLF conversion: remove any existing \r, then add \r before \n
+                sed -i 's/\r$//' "$batfile"
+                sed -i 's/$/\r/' "$batfile"
+            fi
+            crlf_count=$((crlf_count + 1))
+        done < <(find "${APP_DIR}" -type f \( -name "*.bat" -o -name "*.ps1" -o -name "*.cmd" \) -print0)
+        echo -e "${GREEN}  ✓ Converted ${crlf_count} script files to CRLF${NC}"
+        echo ""
+
+        # Package as ZIP
+        echo -e "${YELLOW}[8/8] Creating ZIP package...${NC}"
         local ZIP_FILE="${DIST_DIR}/${PKG_NAME}_${VERSION}_windows.zip"
 
         if command -v zip &>/dev/null; then
@@ -301,21 +503,62 @@ PSLAUNCHER
         echo -e "${GREEN}  ✓ Package created: ${ZIP_FILE} (${SIZE})${NC}"
         echo ""
 
+        # 列出打包内容摘要
+        echo -e "${BLUE}Bundled Components:${NC}"
+        [ -f "${APP_DIR}/resources/xray/xray.exe" ] && \
+            echo -e "  ${GREEN}✓ xray.exe${NC}" || \
+            echo -e "  ${YELLOW}⚠ xray.exe (需用户自行放入)${NC}"
+        [ -f "${APP_DIR}/resources/xray/wintun.dll" ] && \
+            echo -e "  ${GREEN}✓ wintun.dll${NC}" || \
+            echo -e "  ${YELLOW}⚠ wintun.dll (需用户自行放入)${NC}"
+        [ -f "${APP_DIR}/resources/xray/geoip.dat" ] && \
+            echo -e "  ${GREEN}✓ geoip.dat${NC}" || \
+            echo -e "  ${YELLOW}⚠ geoip.dat${NC}"
+        [ -f "${APP_DIR}/resources/xray/geosite.dat" ] && \
+            echo -e "  ${GREEN}✓ geosite.dat${NC}" || \
+            echo -e "  ${YELLOW}⚠ geosite.dat${NC}"
+        # TAP-Windows installer
+        local TAP_SUMMARY=false
+        for tap_exe in "${APP_DIR}"/resources/tap-windows/*.exe; do
+            if [ -f "$tap_exe" ]; then
+                echo -e "  ${GREEN}✓ TAP installer: $(basename "$tap_exe")${NC}"
+                TAP_SUMMARY=true
+            fi
+        done
+        [ "$TAP_SUMMARY" = false ] && echo -e "  ${YELLOW}⚠ TAP installer (需用户自行放入)${NC}"
+        [ -f "${APP_DIR}/resources/nssm/nssm.exe" ] && \
+            echo -e "  ${GREEN}✓ nssm.exe${NC}" || \
+            echo -e "  ${YELLOW}⚠ nssm.exe (需用户自行放入)${NC}"
+        [ -f "${APP_DIR}/resources/openvpn/bin/openvpn.exe" ] && \
+            echo -e "  ${GREEN}✓ openvpn.exe${NC}" || \
+            echo -e "  ${YELLOW}⚠ openvpn.exe (需用户自行放入)${NC}"
+        echo -e "  ${GREEN}✓ start-xray.ps1 (Xray TUN 启动脚本)${NC}"
+        echo -e "  ${GREEN}✓ stop-xray.ps1 (Xray TUN 停止脚本)${NC}"
+        echo -e "  ${GREEN}✓ install.bat (自动安装 TAP 驱动)${NC}"
+        echo -e "  ${GREEN}✓ register-openvpn-service.bat (注册 OpenVPN 服务)${NC}"
+        echo ""
+
         echo -e "${BLUE}═══════════════════════════════════════${NC}"
-        echo -e "${GREEN}Windows Build Instructions:${NC}"
+        echo -e "${GREEN}Windows Installation Instructions:${NC}"
         echo -e "${BLUE}═══════════════════════════════════════${NC}"
         echo ""
-        echo "  1. Copy ${ZIP_FILE} to Windows machine"
-        echo "  2. Extract the archive"
-        echo "  3. Install prerequisites:"
-        echo "     - Python 3.8+: https://www.python.org/"
-        echo "     - OpenVPN + TAP driver: https://openvpn.net/"
-        echo "     - Xray-core: https://github.com/XTLS/Xray-core/releases"
-        echo "  4. Run: ov2n.bat  (or: python main.py)"
+        echo "  1. 将 ${ZIP_FILE} 复制到 Windows 机器"
+        echo "  2. 解压到任意目录 (如 C:\\ov2n)"
+        echo "  3. 右键以管理员身份运行 安装.bat"
+        echo "     - 自动安装 TAP-Windows 驱动"
+        echo "     - 自动检测 NSSM / Xray / OpenVPN"
+        echo "  4. 安装 Python 3.8+: https://www.python.org/"
+        echo "  5. 运行 ov2n.bat 启动 GUI"
         echo ""
-        echo -e "${YELLOW}  NOTE: Windows adaptation is in progress.${NC}"
-        echo -e "${YELLOW}  The platform abstraction layer (core/platform/windows/) ${NC}"
-        echo -e "${YELLOW}  contains stub implementations that need to be completed.${NC}"
+        echo "  Xray TUN 透明代理 (管理员 PowerShell):"
+        echo "    powershell -ExecutionPolicy Bypass -File scripts\\windows\\start-xray.ps1"
+        echo ""
+        echo "  OpenVPN 服务注册 (可选, 管理员):"
+        echo "    scripts\\windows\\register-openvpn-service.bat <config.ovpn>"
+        echo ""
+        echo "  注意: 默认不添加开机自启动服务。"
+        echo "  如需开机自启, 在 GUI 中勾选或手动执行:"
+        echo "    resources\\nssm\\nssm.exe set OV2NService Start SERVICE_AUTO_START"
         echo ""
     }
 
@@ -345,8 +588,12 @@ check_command() {
 }
 
 check_command "python3"
-check_command "dpkg"
-check_command "fakeroot"
+if [ "$PLATFORM" != "windows" ]; then
+    check_command "dpkg"
+    check_command "fakeroot"
+else
+    echo -e "${GREEN}  ✓ dpkg/fakeroot not required for Windows build${NC}"
+fi
 
 echo ""
 

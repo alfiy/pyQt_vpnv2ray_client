@@ -1,7 +1,5 @@
 """
 Windows 平台路径常量。
-
-TODO: 后续填充具体实现。
 """
 import os
 import sys
@@ -9,32 +7,38 @@ import sys
 from core.platform.base import PlatformPaths
 
 
+def _app_root() -> str:
+    """获取应用根目录。"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    # 开发模式: core/platform/windows/paths.py -> 项目根目录
+    return os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+
 class WindowsPaths(PlatformPaths):
     """Windows 平台路径实现。"""
 
+    def __init__(self):
+        self._root = _app_root()
+
+    @property
+    def app_root(self) -> str:
+        return self._root
+
     @property
     def config_dir(self) -> str:
-        """使用 %APPDATA%/ov2n 作为配置目录。"""
         appdata = os.environ.get("APPDATA", os.path.expanduser("~"))
         return os.path.join(appdata, "ov2n")
 
     @property
     def log_dir(self) -> str:
-        """日志存放在配置目录下的 logs 子目录。"""
-        return os.path.join(self.config_dir, "logs")
+        return os.path.join(self._root, "logs")
 
     @property
     def helper_script(self) -> str:
-        """
-        Windows 辅助程序路径。
-        TODO: 实现为 Windows Service 可执行文件路径。
-        """
-        if getattr(sys, 'frozen', False):
-            return os.path.join(os.path.dirname(sys.executable),
-                                "vpn-helper-service.exe")
-        return os.path.join(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__)))),
-            "service", "vpn-helper-service.exe")
+        """Windows 下无 polkit helper，返回空。"""
+        return ""
 
     @property
     def openvpn_log(self) -> str:
@@ -42,19 +46,50 @@ class WindowsPaths(PlatformPaths):
 
     @property
     def v2ray_log(self) -> str:
-        return os.path.join(self.log_dir, "v2ray.log")
+        return os.path.join(self.log_dir, "xray.log")
 
     @property
     def tap_driver_dir(self) -> str:
-        """TAP-Windows 驱动目录，位于 resources/tap-windows 下。"""
-        if getattr(sys, 'frozen', False):
-            app_root = os.path.dirname(sys.executable)
-        else:
-            app_root = os.path.dirname(os.path.dirname(
-                os.path.dirname(os.path.abspath(__file__))))
-        return os.path.join(app_root, "resources", "tap-windows")
+        return os.path.join(self._root, "resources", "tap-windows")
 
     @property
     def system_icon_paths(self) -> list:
-        """Windows 不需要系统图标路径，使用应用内嵌图标。"""
         return []
+
+    # ---- Windows 专有路径 ----
+
+    @property
+    def xray_exe(self) -> str:
+        return os.path.join(self._root, "resources", "xray", "xray.exe")
+
+    @property
+    def xray_dir(self) -> str:
+        return os.path.join(self._root, "resources", "xray")
+
+    @property
+    def xray_config(self) -> str:
+        return os.path.join(self._root, "resources", "xray", "config.json")
+
+    @property
+    def xray_runtime_config(self) -> str:
+        return os.path.join(self._root, "resources", "xray", "config.runtime.json")
+
+    @property
+    def openvpn_exe(self) -> str:
+        return os.path.join(self._root, "resources", "openvpn", "bin", "openvpn.exe")
+
+    @property
+    def openvpn_dir(self) -> str:
+        return os.path.join(self._root, "resources", "openvpn")
+
+    @property
+    def nssm_exe(self) -> str:
+        return os.path.join(self._root, "resources", "nssm", "nssm.exe")
+
+    @property
+    def wintun_dll(self) -> str:
+        return os.path.join(self._root, "resources", "xray", "wintun.dll")
+
+    @property
+    def scripts_dir(self) -> str:
+        return os.path.join(self._root, "scripts")

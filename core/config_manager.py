@@ -6,23 +6,41 @@
 - TProxy 配置持久化 (tproxy.conf)
 - V2Ray 配置验证与默认配置创建
 - 从 V2Ray 配置中提取 TProxy 参数
+
+跨平台说明：
+  Linux   → 配置存储在 ~/.config/ov2n/（原有逻辑不变）
+  Windows → 配置存储在 %APPDATA%\ov2n\
+            validate_v2ray_config 支持含 // 注释的 JSON（xray Windows 模板格式）
+            init_config_files 对已存在且有效的文件绝不覆盖
 """
 import json
 import os
+import platform
 import re
 import shutil
 from typing import Dict, Optional
 
 from core.utils import get_app_root
 
-# ── 配置文件路径常量 ──────────────────────────────
-TPROXY_CONF_PATH = os.path.expanduser("~/.config/ov2n/tproxy.conf")
-CONFIG_PATHS_FILE = os.path.expanduser("~/.config/ov2n/config_paths.json")
-IMPORTED_FLAGS_FILE = os.path.expanduser("~/.config/ov2n/imported_flags.json")
+IS_WINDOWS = platform.system() == "Windows"
 
-# ── 默认配置路径 ──────────────────────────────────
-DEFAULT_VPN_CONFIG = os.path.expanduser("~/.config/ov2n/client.ovpn")
-DEFAULT_V2RAY_CONFIG = os.path.expanduser("~/.config/ov2n/config.json")
+
+# ── 配置目录：Linux 用 ~/.config/ov2n，Windows 用 %APPDATA%\ov2n ──
+def _get_config_dir() -> str:
+    if IS_WINDOWS:
+        appdata = os.environ.get("APPDATA", os.path.expanduser("~"))
+        return os.path.join(appdata, "ov2n")
+    return os.path.expanduser("~/.config/ov2n")
+
+
+_CONFIG_DIR = _get_config_dir()
+
+TPROXY_CONF_PATH    = os.path.join(_CONFIG_DIR, "tproxy.conf")
+CONFIG_PATHS_FILE   = os.path.join(_CONFIG_DIR, "config_paths.json")
+IMPORTED_FLAGS_FILE = os.path.join(_CONFIG_DIR, "imported_flags.json")
+
+DEFAULT_VPN_CONFIG   = os.path.join(_CONFIG_DIR, "client.ovpn")
+DEFAULT_V2RAY_CONFIG = os.path.join(_CONFIG_DIR, "config.json")
 
 
 # ============================================
@@ -67,10 +85,10 @@ def load_config_paths() -> Dict[str, str]:
     try:
         with open(CONFIG_PATHS_FILE, 'r', encoding='utf-8') as f:
             saved = json.load(f)
-        vpn = saved.get('vpn_config', defaults['vpn_config'])
+        vpn   = saved.get('vpn_config',   defaults['vpn_config'])
         v2ray = saved.get('v2ray_config', defaults['v2ray_config'])
         return {
-            'vpn_config': vpn if os.path.exists(vpn) else defaults['vpn_config'],
+            'vpn_config':   vpn   if os.path.exists(vpn)   else defaults['vpn_config'],
             'v2ray_config': v2ray if os.path.exists(v2ray) else defaults['v2ray_config'],
         }
     except Exception as e:
@@ -112,10 +130,10 @@ def load_tproxy_config() -> Dict:
                     k, v = line.split("=", 1)
                     data[k.strip()] = v.strip()
         defaults["enabled"] = data.get("TPROXY_ENABLED", "false").lower() == "true"
-        defaults["vps_ip"] = data.get("VPS_IP", "")
-        defaults["port"] = int(data.get("V2RAY_PORT", 12345))
-        defaults["mark"] = int(data.get("MARK", 1))
-        defaults["table"] = int(data.get("TABLE", 100))
+        defaults["vps_ip"]  = data.get("VPS_IP", "")
+        defaults["port"]    = int(data.get("V2RAY_PORT", 12345))
+        defaults["mark"]    = int(data.get("MARK", 1))
+        defaults["table"]   = int(data.get("TABLE", 100))
     except Exception as e:
         print(f"加载 tproxy 配置失败: {e}")
     return defaults
@@ -141,6 +159,15 @@ def save_tproxy_config(enabled: bool, vps_ip: str, port: int,
 # V2Ray 配置提取与验证
 # ============================================
 
+def _strip_json_comments(text: str) -> str:
+    """
+    移除 JSON 中的单行注释（// 开头的行）。
+    用于支持 xray Windows 模板中含注释的 config.json。
+    Linux 上的标准 JSON 文件同样兼容（无注释则原样返回）。
+    """
+    return re.sub(r'(?m)^\s*//.*$', '', text)
+
+
 def extract_tproxy_config_from_v2ray(config_path: str) -> Optional[Dict]:
     """
     从 V2Ray 配置文件中提取 TProxy 相关参数（VPS IP 和 TProxy 端口）。
@@ -152,18 +179,23 @@ def extract_tproxy_config_from_v2ray(config_path: str) -> Optional[Dict]:
         return None
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
-            config = json.load(f)
+            raw = f.read()
+
+        # 支持含注释的 JSON（xray Windows 模板）
+        config = json.loads(_strip_json_comments(raw))
 
         vps_ip = None
         tproxy_port = None
 
         # 从 outbounds 提取 VPS IP
         for ob in config.get('outbounds', []):
-            if ob.get('protocol') in ['shadowsocks', 'vmess', 'vless', 'trojan', 'socks', 'http']:
+            if ob.get('protocol') in [
+                    'shadowsocks', 'vmess', 'vless', 'trojan', 'socks', 'http']:
                 servers = ob.get('settings', {}).get('servers', [])
                 if servers:
                     addr = servers[0].get('address', '')
-                    if addr and re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', addr):
+                    if addr and re.match(
+                            r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', addr):
                         vps_ip = addr
                         break
 
@@ -189,19 +221,23 @@ def extract_tproxy_config_from_v2ray(config_path: str) -> Optional[Dict]:
 
 
 def validate_v2ray_config(path: str) -> bool:
-    """验证 V2Ray 配置文件是否有效（非空且包含 inbounds/outbounds）。"""
+    """
+    验证 V2Ray 配置文件是否有效（非空且包含 inbounds/outbounds）。
+    支持含 // 单行注释的 JSON（xray Windows 模板格式）。
+    """
     try:
         if os.path.getsize(path) == 0:
             return False
         with open(path, 'r', encoding='utf-8') as f:
-            cfg = json.loads(f.read())
+            raw = f.read()
+        cfg = json.loads(_strip_json_comments(raw))
         return 'inbounds' in cfg and 'outbounds' in cfg
     except Exception:
         return False
 
 
 def create_default_v2ray_config(config_path: str) -> None:
-    """创建默认的 V2Ray 配置文件。"""
+    """创建默认的 V2Ray 配置文件（仅在文件不存在时调用）。"""
     cfg = {
         "log": {"loglevel": "warning"},
         "inbounds": [
@@ -241,34 +277,53 @@ def create_default_v2ray_config(config_path: str) -> None:
 
 def init_config_files(vpn_config_path: str, v2ray_config_path: str) -> None:
     """
-    初始化配置文件：
-    - 如果用户配置目录下不存在配置文件，从开发目录复制
-    - 如果 V2Ray 配置无效，备份后重建默认配置
+    初始化配置文件。
+
+    设计原则（Linux / Windows 一致）：
+      1. 文件不存在 → 从开发目录复制，复制失败才创建默认模板
+      2. 文件存在且有效 → 绝不覆盖（用户自定义配置受保护）
+      3. 文件存在但无效（损坏/空文件）→ 备份后重建默认模板
+
+    Windows 额外说明：
+      - 用户从 GUI 导入配置后，路径保存在 %APPDATA%\ov2n\config_paths.json
+      - v2ray_config_path 指向用户导入的文件，validate 支持含注释的 JSON
+      - 因此正常情况下不会触发重建
     """
     app_root = get_app_root()
-    dev_vpn = os.path.join(app_root, "core", "openvpn", "client.ovpn")
-    dev_v2ray = os.path.join(app_root, "core", "xray", "config.json")
+    dev_vpn   = os.path.join(app_root, "core", "openvpn", "client.ovpn")
+    dev_v2ray = os.path.join(app_root, "core", "xray",   "config.json")
+
     user_cfg_dir = os.path.dirname(v2ray_config_path)
     os.makedirs(user_cfg_dir, exist_ok=True)
 
-    # V2Ray 配置初始化
+    # ── V2Ray 配置初始化 ────────────────────────────
     if not os.path.exists(v2ray_config_path):
+        # 文件不存在：从开发目录复制，复制失败才创建默认模板
         if os.path.exists(dev_v2ray):
             try:
                 shutil.copy2(dev_v2ray, v2ray_config_path)
+                print(f"✓ 已从开发目录复制 V2Ray 配置")
             except Exception as e:
-                print(f"复制失败: {e}")
+                print(f"复制 V2Ray 配置失败: {e}")
                 create_default_v2ray_config(v2ray_config_path)
         else:
             create_default_v2ray_config(v2ray_config_path)
+
     elif not validate_v2ray_config(v2ray_config_path):
+        # 文件存在但无效（损坏/空）：备份后重建
+        # 注意：含注释的 JSON 在 validate_v2ray_config 中已经能正确处理，
+        # 因此用户的 xray Windows 格式配置不会触发此分支
+        backup_path = v2ray_config_path + ".backup"
         try:
-            shutil.copy2(v2ray_config_path, v2ray_config_path + ".backup")
+            shutil.copy2(v2ray_config_path, backup_path)
+            print(f"⚠ V2Ray 配置无效，已备份至 {backup_path}")
         except Exception:
             pass
         create_default_v2ray_config(v2ray_config_path)
 
-    # VPN 配置初始化
+    # else: 文件存在且有效 → 什么都不做，完全保留用户配置
+
+    # ── VPN 配置初始化 ──────────────────────────────
     if not os.path.exists(vpn_config_path) and os.path.exists(dev_vpn):
         try:
             shutil.copy2(dev_vpn, vpn_config_path)

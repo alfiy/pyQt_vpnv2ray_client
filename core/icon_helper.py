@@ -1,6 +1,6 @@
 """
 icon_helper.py
-跨 Linux 发行版图标兼容层
+跨平台图标兼容层（Windows / Linux）
 
 解决两个问题:
 1. Kylin / 部分国产 Linux: emoji 字符在按钮上显示为方块
@@ -15,14 +15,35 @@ icon_helper.py
   新方法：同时渲染 emoji 字符 和 一个确定不存在的私有区字符(U+F0001)，
   比较两张图的像素哈希。若完全相同 → 两者都是 tofu box → 不支持 emoji。
   若不同 → emoji 被正确渲染 → 支持。
+
+Windows 兼容说明:
+  Xlib / python-xlib 是 Linux X11 专用库，Windows 上不存在。
+  所有 Xlib 相关代码已用 IS_WINDOWS / XLIB_AVAILABLE 平台标志保护，
+  Windows 上会自动跳过，不影响其他功能。
 """
 import os
 import sys
+import platform
 from typing import Optional
 from PyQt5.QtWidgets import QStyle, QApplication
 from PyQt5.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QPainterPath
 from PyQt5.QtCore import Qt, QSize
-from Xlib import display as xdisplay, Xatom
+
+# ──────────────────────────────────────────────
+# 0. 平台检测 & Xlib 条件导入
+# ──────────────────────────────────────────────
+IS_WINDOWS = platform.system() == "Windows"
+
+# Xlib 仅在非 Windows 平台尝试导入
+if not IS_WINDOWS:
+    try:
+        from Xlib import display as xdisplay, Xatom
+        XLIB_AVAILABLE = True
+    except ImportError:
+        XLIB_AVAILABLE = False
+else:
+    XLIB_AVAILABLE = False
+
 
 # ──────────────────────────────────────────────
 # 1. 检测系统 emoji 支持
@@ -38,7 +59,6 @@ def _render_char_to_bytes(char: str, size: int = 24) -> bytes:
     painter.drawText(pm.rect(), Qt.AlignCenter, char)
     painter.end()
     img = pm.toImage()
-    # 提取所有像素的 RGB 值拼成字节串
     result = bytearray()
     for y in range(size):
         for x in range(size):
@@ -59,19 +79,17 @@ def _detect_emoji_support() -> bool:
       4. 若不同 → emoji 被正确渲染 → 支持
     """
     try:
-        emoji_bytes  = _render_char_to_bytes("🚀")          # 待检测 emoji
-        tofu_bytes   = _render_char_to_bytes("\U000F0001")   # 确定是 tofu 的私有字符
+        emoji_bytes = _render_char_to_bytes("🚀")
+        tofu_bytes  = _render_char_to_bytes("\U000F0001")
 
-        # 额外验证: emoji 渲染结果不应是纯白（说明确实有内容被渲染）
         all_white = all(b == 255 for b in emoji_bytes)
         if all_white:
-            return False  # 什么都没渲染出来，肯定不支持
+            return False
 
-        # 核心对比: emoji 像素 == tofu 像素 → 都是方块 → 不支持
         return emoji_bytes != tofu_bytes
 
     except Exception:
-        return False  # 出错时保守地返回不支持
+        return False
 
 
 # 全局 emoji 支持标志（懒初始化）
@@ -88,13 +106,12 @@ def emoji_supported() -> bool:
 # ──────────────────────────────────────────────
 # 2. 按钮文字：emoji / 纯文字自动切换
 # ──────────────────────────────────────────────
-# 格式: (emoji版本, 纯文字版本)
 _BUTTON_LABELS = {
-    "start":        ("🚀 {text}",   "▶ {text}"),
-    "stop":         ("⏹ {text}",   "■ {text}"),
-    "import_clip":  ("📋 {text}",  "⊕ {text}"),
-    "edit":         ("✏️ {text}",   "✎ {text}"),
-    "folder":       ("📁 {text}",  "▤ {text}"),
+    "start":        ("🚀 {text}",  "▶ {text}"),
+    "stop":         ("⏹ {text}",  "■ {text}"),
+    "import_clip":  ("📋 {text}", "⊕ {text}"),
+    "edit":         ("✏️ {text}",  "✎ {text}"),
+    "folder":       ("📁 {text}", "▤ {text}"),
 }
 
 
@@ -161,15 +178,17 @@ def _draw_shield_pixmap(size: int) -> QPixmap:
 def _cleanup_bad_user_icons() -> None:
     """
     清理之前版本错误写入到用户目录的盾牌图标。
-    判断依据：若用户目录的 ov2n.png 和系统目录的 ov2n.png 不一致（文件大小不同），
-    则删除用户目录的版本，让系统优先使用 /usr/share/icons/ 下的正确图标。
+    仅在 Linux 上执行，Windows 上直接跳过。
     """
+    if IS_WINDOWS:
+        return
+
     xdg_data_home = os.environ.get(
         "XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
     system_icon = "/usr/share/icons/hicolor/256x256/apps/ov2n.png"
 
     if not os.path.exists(system_icon):
-        return  # 系统没有图标，不操作
+        return
 
     system_size = os.path.getsize(system_icon)
 
@@ -180,17 +199,14 @@ def _cleanup_bad_user_icons() -> None:
         if not os.path.exists(user_icon):
             continue
         try:
-            user_size = os.path.getsize(user_icon)
-            # 若用户图标与系统图标大小不同 → 是之前写入的错误盾牌图标 → 删除
             ref_system = f"/usr/share/icons/hicolor/{size_str}/apps/ov2n.png"
             ref_size = (os.path.getsize(ref_system)
                         if os.path.exists(ref_system) else system_size)
-            if user_size != ref_size:
+            if os.path.getsize(user_icon) != ref_size:
                 os.remove(user_icon)
         except Exception:
             pass
 
-    # 刷新用户图标缓存
     try:
         import subprocess as _sp
         _sp.run(
@@ -204,31 +220,38 @@ def _cleanup_bad_user_icons() -> None:
 def load_window_icon(app_root: str) -> QIcon:
     """
     加载窗口图标。
-    - 启动时自动清理之前版本错误写入的用户盾牌图标
-    - 从 resources/images/ 或系统 /usr/share/icons/ 加载正确的 ov2n 图标
-    - 同时设置 QApplication 元数据，确保 WM_CLASS 和 _NET_WM_ICON 正确
-    - 完全没有图标文件时才程序化生成盾牌（兜底）
+    - Windows: 从 resources/images/ 加载 PNG/ICO
+    - Linux:   从 resources/images/ 或 /usr/share/icons/ 加载，并清理历史遗留图标
+    - 完全没有图标文件时程序化生成盾牌（兜底）
     - 绝不向磁盘写入任何图标文件
     """
-    # 清理历史遗留的错误用户图标
-    _cleanup_bad_user_icons()
+    _cleanup_bad_user_icons()  # Linux 上清理历史遗留，Windows 上是空操作
 
-    candidates = [
-        # resources/images/ 下各尺寸
-        os.path.join(app_root, "resources", "images", "ov2n256.png"),
-        os.path.join(app_root, "resources", "images", "ov2n128.png"),
-        os.path.join(app_root, "resources", "images", "ov2n64.png"),
-        os.path.join(app_root, "resources", "images", "ov2n48.png"),
-        os.path.join(app_root, "resources", "images", "ov2n22.png"),
-        # deb 安装后的系统图标路径
-        "/usr/share/icons/hicolor/256x256/apps/ov2n.png",
-        "/usr/share/icons/hicolor/128x128/apps/ov2n.png",
-        "/usr/share/icons/hicolor/64x64/apps/ov2n.png",
-        "/usr/share/icons/hicolor/48x48/apps/ov2n.png",
-        "/usr/share/icons/hicolor/22x22/apps/ov2n.png",
-        "/usr/share/pixmaps/ov2n256.png",
-        "/usr/share/pixmaps/ov2n.png",
-    ]
+    if IS_WINDOWS:
+        candidates = [
+            # 优先使用 .ico（Windows 原生格式，支持多分辨率）
+            os.path.join(app_root, "resources", "images", "ov2n.ico"),
+            os.path.join(app_root, "resources", "images", "ov2n256.png"),
+            os.path.join(app_root, "resources", "images", "ov2n128.png"),
+            os.path.join(app_root, "resources", "images", "ov2n64.png"),
+            os.path.join(app_root, "resources", "images", "ov2n48.png"),
+            os.path.join(app_root, "resources", "images", "ov2n22.png"),
+        ]
+    else:
+        candidates = [
+            os.path.join(app_root, "resources", "images", "ov2n256.png"),
+            os.path.join(app_root, "resources", "images", "ov2n128.png"),
+            os.path.join(app_root, "resources", "images", "ov2n64.png"),
+            os.path.join(app_root, "resources", "images", "ov2n48.png"),
+            os.path.join(app_root, "resources", "images", "ov2n22.png"),
+            "/usr/share/icons/hicolor/256x256/apps/ov2n.png",
+            "/usr/share/icons/hicolor/128x128/apps/ov2n.png",
+            "/usr/share/icons/hicolor/64x64/apps/ov2n.png",
+            "/usr/share/icons/hicolor/48x48/apps/ov2n.png",
+            "/usr/share/icons/hicolor/22x22/apps/ov2n.png",
+            "/usr/share/pixmaps/ov2n256.png",
+            "/usr/share/pixmaps/ov2n.png",
+        ]
 
     icon = QIcon()
     for path in candidates:
@@ -239,22 +262,17 @@ def load_window_icon(app_root: str) -> QIcon:
         for size in (16, 22, 24, 32, 48, 64, 128, 256):
             icon.addPixmap(_draw_shield_pixmap(size))
 
-    # 【关键】在 QApplication 层面设置图标和元数据
-    # 必须在 QMainWindow.setWindowIcon() 之前执行，
-    # 否则 X11 的 _NET_WM_ICON 属性不会被写入
     app = QApplication.instance()
     if app is not None:
-        # 设置应用名，Qt 用此生成正确的 WM_CLASS（需与 StartupWMClass= 一致）
         app.setApplicationName("ov2n")
-        # 设置 QApplication 级别图标（影响所有窗口和 _NET_WM_ICON）
         app.setWindowIcon(icon)
-        # 关联 .desktop 文件（Qt 5.7+，影响 GNOME 任务栏分组）
         try:
             app.setDesktopFileName("ov2n")
         except AttributeError:
-            pass
+            pass  # Qt < 5.7 或 Windows 上不支持，安全忽略
 
     return icon
+
 
 def apply_window_icon(window) -> None:
     icon = window.windowIcon()
@@ -272,7 +290,10 @@ def apply_window_icon(window) -> None:
     if app is not None:
         app.setWindowIcon(icon)
 
-    # python-xlib 直写优先，成功则跳过 xprop
+    # X11 专用：直写 _NET_WM_ICON，Windows 上跳过
+    if IS_WINDOWS:
+        return
+
     if force_titlebar_icon_x11(window):
         return
 
@@ -282,16 +303,18 @@ def apply_window_icon(window) -> None:
 def _write_net_wm_icon_xprop(window, icon: QIcon) -> bool:
     """
     用 xprop 写入 _NET_WM_ICON。
-    ★ 关键修复：只写 32x32，避免大图导致参数超过 ARG_MAX 而静默失败。
-    256x256 图像会产生 ~65538 个数字，拼成字符串后超过 xprop 能处理的上限。
+    仅在 Linux 上执行；Windows 上直接返回 False。
+    ★ 只写 32x32，避免大图导致参数超过 ARG_MAX 而静默失败。
     """
+    if IS_WINDOWS:
+        return False
+
     try:
         import subprocess as _sp
 
         wid = int(window.winId())
         icon_data_parts = []
 
-        # ★ 只用 32x32，够标题栏显示用，参数长度安全
         for size in (32, 16):
             pm = icon.pixmap(size, size)
             if pm.isNull():
@@ -322,23 +345,30 @@ def _write_net_wm_icon_xprop(window, icon: QIcon) -> bool:
     except Exception:
         return False
 
+
 def force_titlebar_icon_x11(window) -> bool:
+    """
+    用 python-xlib 直写 _NET_WM_ICON。
+    Windows 上或 Xlib 未安装时直接返回 False。
+    """
+    if IS_WINDOWS or not XLIB_AVAILABLE:
+        return False
+
     try:
-        
         icon = window.windowIcon()
-        print(f"[debug] icon.isNull() = {icon.isNull()}")  # ★
+        print(f"[debug] icon.isNull() = {icon.isNull()}")
 
         if icon.isNull():
             return False
 
         wid = int(window.winId())
-        print(f"[debug] wid = {wid}")  # ★
+        print(f"[debug] wid = {wid}")
 
         icon_data = []
         for size in (32, 22, 16):
             pm = icon.pixmap(size, size)
             print(f"[debug] pixmap({size}) isNull={pm.isNull()} "
-                  f"w={pm.width()} h={pm.height()}")  # ★
+                  f"w={pm.width()} h={pm.height()}")
             if pm.isNull():
                 continue
             img = pm.toImage()
@@ -350,7 +380,7 @@ def force_titlebar_icon_x11(window) -> bool:
                     pixel = img.pixel(x, y)
                     icon_data.append(pixel & 0xFFFFFFFF)
 
-        print(f"[debug] icon_data length = {len(icon_data)}")  # ★
+        print(f"[debug] icon_data length = {len(icon_data)}")
 
         if not icon_data:
             return False
@@ -362,15 +392,13 @@ def force_titlebar_icon_x11(window) -> bool:
         xwin.change_property(net_wm_icon, Xatom.CARDINAL, 32, icon_data)
         d.flush()
         d.close()
-        print("[debug] force_titlebar_icon_x11 写入成功")  # ★
+        print("[debug] force_titlebar_icon_x11 写入成功")
         return True
 
-    except ImportError:
-        print("[debug] python-xlib 未安装")  # ★
-        return False
     except Exception as e:
-        print(f"[debug] force_titlebar_icon_x11 异常: {e}")  # ★
+        print(f"[debug] force_titlebar_icon_x11 异常: {e}")
         return False
+
 
 # ──────────────────────────────────────────────
 # 4. Qt 标准图标（可选，用于工具栏/菜单）

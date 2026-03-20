@@ -1,13 +1,27 @@
 """
-Windows 平台实现包。
+Windows 平台实现模块。
 
-当前状态：架构骨架（stub），所有方法抛出 NotImplementedError。
-后续逐步填充具体实现。
-
-Windows 适配要点：
-- 权限提升: UAC (runas) + Windows Service 注册
-- 代理: netsh 系统代理 / v2rayN 集成（放弃 TProxy）
-- 进程管理: taskkill / TerminateProcess
-- TAP 驱动: 安装 tap-windows 驱动
-- 图标: Qt 原生支持，无需 X11 hack
+提供以下组件：
+- WindowsPaths: 路径常量
+- WindowsPrivilegeHandler: 权限提升（UAC + NSSM 服务注册）
+- WindowsProcessManager: 进程管理（taskkill/tasklist）
+- WindowsProxyManager: 代理管理（Xray TUN 透明代理）
+- WindowsIconHandler: 图标处理
+- WindowsShellHelper: Shell 辅助工具
 """
+
+from core.platform.windows.paths import WindowsPaths
+from core.platform.windows.privilege import WindowsPrivilegeHandler
+from core.platform.windows.process_manager import WindowsProcessManager
+from core.platform.windows.proxy import WindowsProxyManager
+from core.platform.windows.icon import WindowsIconHandler
+from core.platform.windows.shell_helper import WindowsShellHelper
+
+__all__ = [
+    "WindowsPaths",
+    "WindowsPrivilegeHandler",
+    "WindowsProcessManager",
+    "WindowsProxyManager",
+    "WindowsIconHandler",
+    "WindowsShellHelper",
+]
