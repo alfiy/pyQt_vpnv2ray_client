@@ -1,23 +1,55 @@
-# ov2n - Xray TUN 启动脚本 (Windows)
+﻿# ov2n - Xray TUN 启动脚本 (Windows)
 # 编码: UTF-8 with BOM
 # 需要管理员权限运行
+#
+# 用法:
+#   .\start-xray.ps1                          # 自动查找 config.json
+#   .\start-xray.ps1 -ConfigPath "C:\path\to\config.json"  # 指定配置文件
+
+param(
+    [string]$ConfigPath = ""
+)
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "error: 请以管理员身份运行"; exit 1
 }
 
-$dir = Split-Path -Parent $MyInvocation.MyCommand.Path
-# 脚本在 scripts/windows/ 下，xray 在 resources/xray/ 下
+$dir     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appRoot = (Resolve-Path "$dir\..\..").Path
 $xrayDir = Join-Path $appRoot "resources\xray"
 
 Set-Location $xrayDir
 
-$configPath = Join-Path $xrayDir "config.json"
-if (-not (Test-Path $configPath)) { Write-Host "error: config.json not found at $configPath"; exit 1 }
+# ── 查找 config.json ────────────────────────────────────────
+# 优先级：
+#   1. 命令行参数 -ConfigPath（privilege.py 传入用户数据目录的路径）
+#   2. %APPDATA%\ov2n\config.json（用户通过 GUI 导入的配置）
+#   3. resources\xray\config.json（兜底，开发/调试用）
+
+if ($ConfigPath -ne "" -and (Test-Path $ConfigPath)) {
+    $resolvedConfigPath = $ConfigPath
+    Write-Host "使用指定配置: $resolvedConfigPath"
+} else {
+    $appDataConfig = Join-Path $env:APPDATA "ov2n\config.json"
+    $bundledConfig = Join-Path $xrayDir "config.json"
+
+    if (Test-Path $appDataConfig) {
+        $resolvedConfigPath = $appDataConfig
+        Write-Host "使用用户配置: $resolvedConfigPath"
+    } elseif (Test-Path $bundledConfig) {
+        $resolvedConfigPath = $bundledConfig
+        Write-Host "使用内置配置: $resolvedConfigPath"
+    } else {
+        Write-Host "error: config.json not found. Please import Xray config in the GUI first."
+        Write-Host "  Searched:"
+        Write-Host "    $appDataConfig"
+        Write-Host "    $bundledConfig"
+        exit 1
+    }
+}
 
 # 读取并去掉注释
-$configContent = Get-Content $configPath -Raw -Encoding utf8
+$configContent = Get-Content $resolvedConfigPath -Raw -Encoding utf8
 $configContent = $configContent -replace '(?m)^\s*//.*$', ''
 
 try {
@@ -37,9 +69,7 @@ $vpsAddr = $config.outbounds |
 if (-not $vpsAddr) { Write-Host "error: 无法从 config.json 获取 VPS 地址"; exit 1 }
 Write-Host "VPS: $vpsAddr"
 
-# ★ 获取默认网关和物理网卡
-# 排除所有虚拟/VPN 网卡：xray-tun、TAP、OpenVPN tap 适配器等
-# 匹配条件：NextHop 不是 0.0.0.0，且网卡名不包含 tun/tap/loopback 关键词
+# 获取默认网关和物理网卡（排除虚拟/VPN 网卡）
 $defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" |
     Where-Object {
         $_.NextHop -ne "0.0.0.0" -and
@@ -49,7 +79,6 @@ $defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" |
     Sort-Object RouteMetric |
     Select-Object -First 1
 
-# 如果过滤后找不到，降级为只排除 xray-tun（兼容 TAP 网卡名不规范的情况）
 if (-not $defaultRoute) {
     Write-Host "警告: 严格过滤未找到默认路由，尝试宽松过滤..."
     $defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" |
@@ -68,7 +97,7 @@ $realIdx   = $defaultRoute.InterfaceIndex
 $realAlias = $defaultRoute.InterfaceAlias
 Write-Host "选中网卡: $realAlias (索引: $realIdx), 网关: $gateway"
 
-# ★ 获取本机 IP：只取 IPv4，排除 169.254.x.x 链路本地地址
+# 获取本机 IP（排除链路本地地址）
 $localIP = Get-NetIPAddress -InterfaceIndex $realIdx -AddressFamily IPv4 |
     Where-Object { $_.IPAddress -notmatch "^169\.254\." } |
     Select-Object -First 1 |
@@ -91,7 +120,7 @@ foreach ($ob in $config.outbounds) {
     }
 }
 
-# 无 BOM 的 UTF-8 写入 runtime config
+# 写入 runtime config（无 BOM UTF-8）
 $tempConfigPath = Join-Path $xrayDir "config.runtime.json"
 $jsonContent = $config | ConvertTo-Json -Depth 20
 [System.IO.File]::WriteAllText(
@@ -100,7 +129,7 @@ $jsonContent = $config | ConvertTo-Json -Depth 20
     (New-Object System.Text.UTF8Encoding $false)
 )
 
-# 验证编码（不能有 BOM）
+# 验证编码
 $bytes = [System.IO.File]::ReadAllBytes($tempConfigPath)
 $header = "{0:X2} {1:X2} {2:X2}" -f $bytes[0], $bytes[1], $bytes[2]
 Write-Host "文件头: $header"
@@ -108,7 +137,7 @@ if ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
     Write-Host "error: config.runtime.json 含有 BOM"; exit 1
 }
 
-# 验证 JSON 可解析
+# 验证 JSON
 try {
     Get-Content $tempConfigPath -Raw | ConvertFrom-Json | Out-Null
     Write-Host "JSON 验证通过"
@@ -134,7 +163,7 @@ $xrayPath = Join-Path $xrayDir "xray.exe"
 Start-Process -FilePath $xrayPath -ArgumentList "-config `"$tempConfigPath`"" -WindowStyle Minimized
 Write-Host "xray 已启动，等待 xray-tun 创建..."
 
-# 等待 xray-tun 出现，最多 20 秒
+# 等待 xray-tun 出现
 $adapter = $null
 $waited = 0
 do {
@@ -157,7 +186,7 @@ Start-Sleep -Seconds 2
 netsh interface ip set address name="xray-tun" static 10.0.0.1 255.255.255.0
 Start-Sleep -Seconds 1
 
-# 重新读取 tunIdx（网卡重建后索引可能变化）
+# 重新读取 tunIdx
 $adapter = Get-NetAdapter -Name "xray-tun"
 $tunIdx  = $adapter.InterfaceIndex
 Write-Host "xray-tun 索引: $tunIdx"

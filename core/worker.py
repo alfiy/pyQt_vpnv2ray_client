@@ -166,9 +166,9 @@ class SingleV2RayThread(QThread):
         try:
             self.update_signal.emit("正在启动 Xray（TUN 模式）...")
             handler = _get_windows_handler()
-            # start_xray() 调用 start-xray.ps1，不需要传入配置路径
-            # ps1 脚本自动从 resources/xray/config.json 读取
-            ok, msg = handler.start_xray()
+            # 把用户导入的配置路径传给 ps1，ps1 优先使用此路径，
+            # 其次是 %APPDATA%\ov2n\config.json，最后才是内置模板
+            ok, msg = handler.start_xray(self.v2ray_config_path)
             if ok:
                 # Windows 服务模式无进程 PID，用 0 占位
                 self.success_signal.emit({'pid': 0, 'tproxy_ok': False})
@@ -285,7 +285,7 @@ class CombinedStartThread(QThread):
                     os.path.join(handler._paths.app_root,
                                  "resources", "xray", "config.json")):
                 self.update_signal.emit("正在启动 Xray（TUN 模式）...")
-                ok, msg = handler.start_xray()
+                ok, msg = handler.start_xray(self.v2ray_config_path)
                 if ok:
                     xray_started = True
                 else:

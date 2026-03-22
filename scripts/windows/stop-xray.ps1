@@ -1,4 +1,4 @@
-# ov2n - Xray TUN 停止脚本 (Windows)
+﻿# ov2n - Xray TUN 停止脚本 (Windows)
 # 编码: UTF-8 with BOM
 # 需要管理员权限运行
 

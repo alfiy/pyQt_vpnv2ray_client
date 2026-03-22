@@ -85,14 +85,14 @@ class WindowsPrivilegeHandler(PrivilegeHandler):
             return False, f"VPN 配置文件不存在: {vpn_config_path}"
 
         try:
-            # 用 cmd /C 调用 bat，避免 bat 末尾的 pause 导致进程永远阻塞。
-            # encoding='utf-8' + errors='replace' 防止 GBK/UTF-8 混合输出导致崩溃。
+            # 直接调用 bat（已移除 pause，不会阻塞）。
+            # 不使用 CREATE_NO_WINDOW，确保 NSSM install 能正确执行。
+            # encoding='utf-8' + errors='replace' 防止 GBK 输出崩溃。
             result = subprocess.run(
-                ["cmd", "/C", bat, vpn_config_path],
+                [bat, vpn_config_path],
                 capture_output=True, text=True,
                 encoding='utf-8', errors='replace',
                 timeout=60,
-                creationflags=CREATE_NO_WINDOW,
             )
             if result.returncode == 0:
                 return True, "OV2NService 注册成功"
@@ -136,11 +136,15 @@ class WindowsPrivilegeHandler(PrivilegeHandler):
     # Xray 管理（通过 PowerShell 脚本）
     # ══════════════════════════════════════════
 
-    def start_xray(self) -> Tuple[bool, str]:
+    def start_xray(self, v2ray_config_path: str = "") -> Tuple[bool, str]:
         """
         调用 start-xray.ps1 启动 Xray TUN 模式。
         脚本内部负责：sendThrough 注入、路由设置、DNS 配置、TUN 适配器。
         需要管理员权限（脚本自身会检查）。
+
+        Args:
+            v2ray_config_path: 用户导入的 config.json 路径，
+                               不传则 ps1 自动按优先级查找。
 
         Returns:
             (success, message)
@@ -151,19 +155,31 @@ class WindowsPrivilegeHandler(PrivilegeHandler):
             return False, f"Xray 启动脚本未找到: {ps1}"
 
         try:
-            # encoding='utf-8' + errors='replace' 防止 PowerShell 输出 GBK 字节崩溃
+            # 构建命令：有用户配置路径时通过 -ConfigPath 传入 ps1
+            cmd = [
+                "powershell",
+                "-NonInteractive",
+                "-ExecutionPolicy", "Bypass",
+                "-File", ps1,
+            ]
+            if v2ray_config_path and os.path.isfile(v2ray_config_path):
+                cmd += ["-ConfigPath", v2ray_config_path]
             result = subprocess.run(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps1],
+                cmd,
                 capture_output=True, text=True,
                 encoding='utf-8', errors='replace',
                 timeout=120,
-                creationflags=CREATE_NO_WINDOW,
             )
             output = result.stdout.strip()
+            stderr = result.stderr.strip()
             if result.returncode == 0 and "启动完成" in output:
                 return True, "Xray 已启动"
+            # 收集所有 error: 行，无则返回完整输出方便排查
             error_lines = [l for l in output.splitlines() if l.startswith("error:")]
-            detail = "\n".join(error_lines) if error_lines else output
+            if not error_lines and stderr:
+                detail = stderr
+            else:
+                detail = "\n".join(error_lines) if error_lines else output
             return False, f"Xray 启动失败: {detail}"
         except subprocess.TimeoutExpired:
             return False, "Xray 启动超时（120s），请检查 config.json 及网络"
@@ -233,11 +249,11 @@ class WindowsPrivilegeHandler(PrivilegeHandler):
             else:
                 errors.append(f"OpenVPN: {msg}")
 
-        # Xray（可选）
+        # Xray（可选）：把用户配置路径传给 start_xray，ps1 会优先使用
         xray_config = os.path.join(
             self._paths.app_root, "resources", "xray", "config.json")
         if v2ray_config_path or os.path.isfile(xray_config):
-            ok, msg = self.start_xray()
+            ok, msg = self.start_xray(v2ray_config_path)
             if ok:
                 info["xray_started"] = True
             else:
