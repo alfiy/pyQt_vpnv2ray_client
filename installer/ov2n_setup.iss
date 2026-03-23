@@ -355,5 +355,16 @@ begin
       end;
     end;
   end;
+
+  // ── 卸载完成后删除安装目录 ────────────────────────────
+  // usPostUninstall 在所有文件删除完成后触发，此时再删除
+  // 安装目录本身（Inno Setup 可能因目录非空而无法自动删除）
+  if CurUninstallStep = usPostUninstall then
+  begin
+    if DirExists(ExpandConstant('{app}')) then
+    begin
+      DelTree(ExpandConstant('{app}'), True, True, True);
+    end;
+  end;
 end;
 
