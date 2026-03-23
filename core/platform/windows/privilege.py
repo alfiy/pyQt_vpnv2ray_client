@@ -172,14 +172,25 @@ class WindowsPrivilegeHandler(PrivilegeHandler):
             )
             output = result.stdout.strip()
             stderr = result.stderr.strip()
-            if result.returncode == 0 and "启动完成" in output:
+            # 用 returncode 和 ASCII 标记判断成功，避免中文乱码导致误判。
+            # ps1 成功时：returncode=0 且输出包含 "=====" (ASCII, 不受编码影响)
+            # ps1 失败时：returncode!=0 或输出包含 "error:" (ASCII)
+            # 判断成功：returncode=0 即为成功。
+            # ps1 里 route add 的"路由已存在"警告不影响功能，不计为错误。
+            # 不用检查中文输出（会乱码），也不用检查 =====（有时会缺失）。
+            if result.returncode == 0:
                 return True, "Xray 已启动"
-            # 收集所有 error: 行，无则返回完整输出方便排查
+            # 失败时收集 error: 行（ASCII 前缀，不受乱码影响）
             error_lines = [l for l in output.splitlines() if l.startswith("error:")]
-            if not error_lines and stderr:
+            if error_lines:
+                detail = "\n".join(error_lines)
+            elif stderr:
                 detail = stderr
+            elif output:
+                last_lines = [l for l in output.splitlines() if l.strip()][-3:]
+                detail = "\n".join(last_lines)
             else:
-                detail = "\n".join(error_lines) if error_lines else output
+                detail = f"exit code: {result.returncode}"
             return False, f"Xray 启动失败: {detail}"
         except subprocess.TimeoutExpired:
             return False, "Xray 启动超时（120s），请检查 config.json 及网络"

@@ -1,12 +1,10 @@
 ﻿# ov2n - Xray TUN 停止脚本 (Windows)
 # 编码: UTF-8 with BOM
 # 需要管理员权限运行
-
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "error: 请以管理员身份运行"; exit 1
 }
-
-$dir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$dir     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appRoot = (Resolve-Path "$dir\..\..").Path
 $xrayDir = Join-Path $appRoot "resources\xray"
 
@@ -47,17 +45,55 @@ if ($vpsAddr) {
     Write-Host "已清理 VPS 路由: $vpsAddr"
 }
 
-# 恢复 DNS
-Write-Host "恢复 DNS 设置..."
-$defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" |
-    Where-Object { $_.NextHop -ne "0.0.0.0" -and $_.InterfaceAlias -ne "xray-tun" } |
-    Sort-Object RouteMetric |
-    Select-Object -First 1
+# ── 恢复 DNS ──────────────────────────────────────────────
+# 优先从 start-xray.ps1 保存的 dns_backup.txt 恢复原始配置
+# 避免无条件设为 DHCP 导致静态 DNS 用户重启后无法联网
+Write-Host "恢复 DNS 配置..."
+$dnsFile = Join-Path $xrayDir "dns_backup.txt"
 
-if ($defaultRoute) {
-    $realAlias = $defaultRoute.InterfaceAlias
-    netsh interface ip set dns name="$realAlias" dhcp 2>$null
-    Write-Host "已恢复 $realAlias DNS 为 DHCP"
+if (Test-Path $dnsFile) {
+    try {
+        $line = Get-Content $dnsFile -Raw -Encoding UTF8
+        $line = $line.Trim()
+        $parts = $line -split '\|', 2
+        $savedAlias = $parts[0].Trim()
+        $savedDns   = $parts[1].Trim()
+
+        if ($savedDns -eq "DHCP" -or $savedDns -eq "") {
+            # 原来是 DHCP，恢复为 DHCP
+            netsh interface ip set dns name="$savedAlias" dhcp 2>$null
+            Write-Host "已恢复 $savedAlias DNS 为 DHCP"
+        } else {
+            # 原来是静态 DNS，逐条恢复
+            $dnsList = $savedDns -split ','
+            netsh interface ip set dns name="$savedAlias" static $dnsList[0] 2>$null
+            for ($i = 1; $i -lt $dnsList.Count; $i++) {
+                netsh interface ip add dns name="$savedAlias" $dnsList[$i] index=($i + 1) 2>$null
+            }
+            Write-Host "已恢复 $savedAlias 静态 DNS: $savedDns"
+        }
+
+        # 恢复完成后删除备份文件
+        Remove-Item $dnsFile -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Host "警告: DNS 备份文件读取失败 ($_)，尝试回退到 DHCP"
+        $defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" |
+            Where-Object { $_.NextHop -ne "0.0.0.0" -and $_.InterfaceAlias -ne "xray-tun" } |
+            Sort-Object RouteMetric | Select-Object -First 1
+        if ($defaultRoute) {
+            netsh interface ip set dns name="$($defaultRoute.InterfaceAlias)" dhcp 2>$null
+        }
+    }
+} else {
+    # 没有备份文件（旧版本或异常退出），回退到 DHCP
+    Write-Host "未找到 DNS 备份，回退到 DHCP"
+    $defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" |
+        Where-Object { $_.NextHop -ne "0.0.0.0" -and $_.InterfaceAlias -ne "xray-tun" } |
+        Sort-Object RouteMetric | Select-Object -First 1
+    if ($defaultRoute) {
+        netsh interface ip set dns name="$($defaultRoute.InterfaceAlias)" dhcp 2>$null
+        Write-Host "已恢复 $($defaultRoute.InterfaceAlias) DNS 为 DHCP"
+    }
 }
 
 ipconfig /flushdns | Out-Null

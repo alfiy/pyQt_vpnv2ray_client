@@ -196,7 +196,20 @@ route add $vpsAddr mask 255.255.255.255 $gateway metric 1 if $realIdx
 route add $gateway  mask 255.255.255.255 $gateway metric 1 if $realIdx
 route add 0.0.0.0   mask 0.0.0.0        10.0.0.0 metric 5 if $tunIdx
 
-# 设置 DNS
+# 保存原始 DNS 配置，供 stop-xray.ps1 恢复使用
+$dnsFile = Join-Path $xrayDir "dns_backup.txt"
+$origDns = (Get-DnsClientServerAddress -InterfaceIndex $realIdx -AddressFamily IPv4).ServerAddresses
+if ($origDns -and $origDns.Count -gt 0) {
+    # 格式: 网卡名|DNS1,DNS2,...
+    "$realAlias|$($origDns -join ',')" | Set-Content $dnsFile -Encoding UTF8
+    Write-Host "已保存原始 DNS: $($origDns -join ', ')"
+} else {
+    # 原来是 DHCP，记录为空
+    "$realAlias|DHCP" | Set-Content $dnsFile -Encoding UTF8
+    Write-Host "原始 DNS: DHCP"
+}
+
+# 设置 DNS（使用固定 DNS 保证 xray 运行期间解析正常）
 netsh interface ip set dns name="$realAlias" static 114.114.114.114
 netsh interface ip add dns name="$realAlias" 8.8.8.8 index=2
 ipconfig /flushdns
