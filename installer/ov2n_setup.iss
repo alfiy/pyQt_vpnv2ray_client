@@ -6,17 +6,15 @@
 ; ============================================================
 
 #define MyAppName      "ov2n"
-#define MyAppVersion   "1.4.2"
+#define MyAppVersion   "1.4.3"
 #define MyAppPublisher "Alfiy"
 #define MyAppURL       "https://github.com/alfiy/pyQt_vpnv2ray_client"
 #define MyAppExeName   "ov2n_launcher.vbs"
-; MyAppIcon is built dynamically using {#SourcePath} - see SetupIconFile below
 
-; Python 安装包路径
+; Python 安装包路径（相对于项目根目录）
 #define PythonInstaller "resources\python\python-3.12.10-amd64.exe"
 
 [Setup]
-; 所有相对路径均相对于项目根目录（installer\ 的上一级）
 ; ── 基本信息 ──────────────────────────────────────────────
 AppId={{8F3A2E1D-4B6C-4D8E-9F0A-1B2C3D4E5F6A}
 AppName={#MyAppName}
@@ -28,14 +26,10 @@ AppUpdatesURL={#MyAppURL}
 AppCopyright=Copyright (C) 2024 {#MyAppPublisher}
 
 ; ── 安装模式：让用户选择"仅为我"或"所有用户" ──────────────
-; PrivilegesRequired=lowest 配合 PrivilegesRequiredOverridesAllowed
-; 实现在安装向导里动态选择
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 
 ; ── 默认安装目录 ──────────────────────────────────────────
-; {autopf}  = 管理员模式下解析为 %ProgramFiles%
-;             普通用户模式下解析为 %LOCALAPPDATA%\Programs
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
@@ -50,7 +44,6 @@ LZMANumBlockThreads=4
 
 ; ── 向导界面 ──────────────────────────────────────────────
 WizardStyle=modern
-; WizardSmallImageFile={#MyAppIcon}
 ShowLanguageDialog=auto
 
 ; ── 最低系统要求 ──────────────────────────────────────────
@@ -65,7 +58,6 @@ UninstallDisplayIcon={app}\resources\images\ov2n.ico
 CreateUninstallRegKey=yes
 
 ; ── 其他 ──────────────────────────────────────────────────
-; 安装前关闭正在运行的实例
 CloseApplications=yes
 CloseApplicationsFilter=*.exe,*.bat
 RestartApplications=no
@@ -77,7 +69,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [CustomMessages]
 InstallPython=Python 3 is not installed. The installer will automatically install Python 3.12.10.
 InstallingPython=Installing Python 3.12.10, please wait...
-InstallingTAP=Installing TAP-Windows driver...
+InstallingTAP=Installing TAP-Windows driver, please wait...
+InstallingDeps=Installing Python dependencies (PyQt5, etc.), please wait...
 TAPInstalled=TAP-Windows driver installed successfully.
 AutoStartup=Start {#MyAppName} automatically at login
 InstallForAllUsers=Install for all users (requires Administrator)
@@ -109,15 +102,16 @@ Source: "..\resources\openvpn\*";         DestDir: "{app}\resources\openvpn"; Fl
 ; ── NSSM ─────────────────────────────────────────────────
 Source: "..\resources\nssm\*";            DestDir: "{app}\resources\nssm";   Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
-; ── TAP-Windows 驱动（仅在需要时运行，不解压到安装目录）──
-; 用 {tmp} 临时目录运行，安装完成后自动清理
+; ── TAP-Windows 驱动
+; 解压到 {tmp}，安装完成后自动清理，不保留在安装目录
 Source: "..\resources\tap-windows\tap-windows-installer.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall skipifsourcedoesntexist
+
+; ── Python 安装包
+; 解压到 {tmp}，安装完成后自动清理，不保留在安装目录
+Source: "..\{#PythonInstaller}";          DestDir: "{tmp}";           Flags: deleteafterinstall skipifsourcedoesntexist
 
 ; ── Windows 脚本 ──────────────────────────────────────────
 Source: "..\scripts\windows\*";           DestDir: "{app}\scripts\windows";  Flags: ignoreversion recursesubdirs createallsubdirs
-
-; ── Python 安装包（仅当 Python 未安装时使用）────────────
-Source: "..\{#PythonInstaller}";       DestDir: "{tmp}";           Flags: deleteafterinstall skipifsourcedoesntexist
 
 ; ── 日志目录占位 ─────────────────────────────────────────
 Source: "..\logs\README.txt";             DestDir: "{app}\logs";      Flags: ignoreversion skipifsourcedoesntexist
@@ -160,7 +154,6 @@ Name: "startup";     Description: "{cm:AutoStartup}";                GroupDescri
 ; 注册表
 ; ============================================================
 [Registry]
-; 记录安装路径供 Python 脚本使用（写入 HKCU，无需管理员）
 Root: HKCU; Subkey: "Software\ov2n"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\ov2n"; ValueType: string; ValueName: "Version";    ValueData: "{#MyAppVersion}"
 
@@ -172,50 +165,26 @@ Root: HKCU; Subkey: "Software\ov2n"; ValueType: string; ValueName: "Version";   
 // ── 全局变量 ─────────────────────────────────────────────
 var
   PythonInstalled: Boolean;
-  TAPInstalled: Boolean;
+  TAPInstalled:    Boolean;
 
 // ── 检测 Python 是否已安装 ───────────────────────────────
+// 依次检查 HKLM / HKCU 中 3.10 ~ 3.12 的注册表路径，
+// 最后回退到直接执行 python --version
 function IsPythonInstalled(): Boolean;
 var
   PythonPath: String;
   ResultCode: Integer;
 begin
   Result := False;
-
-  // 检查注册表中的 Python 安装记录（Python 3.x 64位）
-  if RegQueryStringValue(HKLM, 'SOFTWARE\Python\PythonCore\3.12\InstallPath', '', PythonPath) then
-  begin
-    Result := True; Exit;
-  end;
-  if RegQueryStringValue(HKLM, 'SOFTWARE\Python\PythonCore\3.11\InstallPath', '', PythonPath) then
-  begin
-    Result := True; Exit;
-  end;
-  if RegQueryStringValue(HKLM, 'SOFTWARE\Python\PythonCore\3.10\InstallPath', '', PythonPath) then
-  begin
-    Result := True; Exit;
-  end;
-  if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.12\InstallPath', '', PythonPath) then
-  begin
-    Result := True; Exit;
-  end;
-  if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.11\InstallPath', '', PythonPath) then
-  begin
-    Result := True; Exit;
-  end;
-  if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.10\InstallPath', '', PythonPath) then
-  begin
-    Result := True; Exit;
-  end;
-
-  // 尝试运行 python --version 作为兜底检测
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Python\PythonCore\3.12\InstallPath', '', PythonPath) then begin Result := True; Exit; end;
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Python\PythonCore\3.11\InstallPath', '', PythonPath) then begin Result := True; Exit; end;
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Python\PythonCore\3.10\InstallPath', '', PythonPath) then begin Result := True; Exit; end;
+  if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.12\InstallPath', '', PythonPath) then begin Result := True; Exit; end;
+  if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.11\InstallPath', '', PythonPath) then begin Result := True; Exit; end;
+  if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.10\InstallPath', '', PythonPath) then begin Result := True; Exit; end;
+  // 兜底：尝试直接执行
   if Exec('python', '--version', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-  begin
-    if ResultCode = 0 then
-    begin
-      Result := True; Exit;
-    end;
-  end;
+    if ResultCode = 0 then begin Result := True; Exit; end;
 end;
 
 // ── 检测 TAP 驱动是否已安装 ──────────────────────────────
@@ -224,23 +193,53 @@ var
   TAPVersion: String;
 begin
   Result := False;
-  // 检查 TAP-Windows 注册表项
-  if RegQueryStringValue(HKLM, 'SOFTWARE\TAP-Windows', 'Version', TAPVersion) then
-  begin
-    Result := True; Exit;
+  if RegQueryStringValue(HKLM, 'SOFTWARE\TAP-Windows',  'Version', TAPVersion) then begin Result := True; Exit; end;
+  if RegQueryStringValue(HKLM, 'SOFTWARE\TAP-Windows6', 'Version', TAPVersion) then begin Result := True; Exit; end;
+  if RegQueryStringValue(HKLM, 'SOFTWARE\OpenVPN\TapAdapter', '', TAPVersion)  then begin Result := True; Exit; end;
+end;
+
+// ── 从注册表读取 Python 完整可执行路径 ───────────────────
+// 新安装的 Python 在当前进程的 PATH 中还未生效，
+// 必须从注册表直接拼出完整路径才能调用。
+// Pascal Script 不支持嵌套函数，直接内联判断逻辑。
+function GetPythonExePath(): String;
+var
+  InstallPath: String;
+begin
+  Result := 'python'; // 最终兜底：依赖 PATH
+
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Python\PythonCore\3.12\InstallPath', '', InstallPath) then begin
+    if FileExists(InstallPath + 'python.exe')  then begin Result := InstallPath + 'python.exe';  Exit; end;
+    if FileExists(InstallPath + '\python.exe') then begin Result := InstallPath + '\python.exe'; Exit; end;
   end;
-  // 检查 OpenVPN TAP 适配器
-  if RegQueryStringValue(HKLM, 'SOFTWARE\OpenVPN\TapAdapter', '', TAPVersion) then
-  begin
-    Result := True; Exit;
+  if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.12\InstallPath', '', InstallPath) then begin
+    if FileExists(InstallPath + 'python.exe')  then begin Result := InstallPath + 'python.exe';  Exit; end;
+    if FileExists(InstallPath + '\python.exe') then begin Result := InstallPath + '\python.exe'; Exit; end;
+  end;
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Python\PythonCore\3.11\InstallPath', '', InstallPath) then begin
+    if FileExists(InstallPath + 'python.exe')  then begin Result := InstallPath + 'python.exe';  Exit; end;
+    if FileExists(InstallPath + '\python.exe') then begin Result := InstallPath + '\python.exe'; Exit; end;
+  end;
+  if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.11\InstallPath', '', InstallPath) then begin
+    if FileExists(InstallPath + 'python.exe')  then begin Result := InstallPath + 'python.exe';  Exit; end;
+    if FileExists(InstallPath + '\python.exe') then begin Result := InstallPath + '\python.exe'; Exit; end;
+  end;
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Python\PythonCore\3.10\InstallPath', '', InstallPath) then begin
+    if FileExists(InstallPath + 'python.exe')  then begin Result := InstallPath + 'python.exe';  Exit; end;
+    if FileExists(InstallPath + '\python.exe') then begin Result := InstallPath + '\python.exe'; Exit; end;
+  end;
+  if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.10\InstallPath', '', InstallPath) then begin
+    if FileExists(InstallPath + 'python.exe')  then begin Result := InstallPath + 'python.exe';  Exit; end;
+    if FileExists(InstallPath + '\python.exe') then begin Result := InstallPath + '\python.exe'; Exit; end;
   end;
 end;
 
-// ── 安装开始前的初始化 ────────────────────────────────────
+// ── 安装向导初始化 ────────────────────────────────────────
+// 在文件复制前检测当前环境，结果保存到全局变量
 procedure InitializeWizard();
 begin
   PythonInstalled := IsPythonInstalled();
-  TAPInstalled := IsTAPInstalled();
+  TAPInstalled    := IsTAPInstalled();
 end;
 
 // ── 安装步骤执行 ─────────────────────────────────────────
@@ -248,37 +247,53 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
   TmpDir:     String;
+  AppDir:     String;
   PythonExe:  String;
   TAPExe:     String;
 begin
-  if CurStep = ssInstall then
+  // =========================================================
+  // 关键说明：
+  //   ssInstall  阶段 = Inno Setup 正在解压文件，{tmp} 尚未就绪
+  //   ssPostInstall 阶段 = 所有文件已解压完毕，{tmp} 中的
+  //                         Python/TAP 安装包此时才可读取
+  // 因此 Python、TAP、pip 三步全部放在 ssPostInstall 执行。
+  // =========================================================
+  if CurStep = ssPostInstall then
   begin
     TmpDir := ExpandConstant('{tmp}');
+    AppDir := ExpandConstant('{app}');
 
-    // ── Step 1: 安装 Python（如果未安装）──────────────────
+    // 确保日志目录存在
+    ForceDirectories(AppDir + '\logs');
+
+    // ── Step 1: 安装 Python（如果目标机器未安装）──────────
     if not PythonInstalled then
     begin
       PythonExe := TmpDir + '\python-3.12.10-amd64.exe';
       if FileExists(PythonExe) then
       begin
         WizardForm.StatusLabel.Caption := ExpandConstant('{cm:InstallingPython}');
-        // /quiet          - 静默安装，无 UI
-        // InstallAllUsers=0 / 1 由安装模式决定
-        // PrependPath=1   - 自动添加到 PATH
-        // Include_test=0  - 不安装测试套件（节省空间）
         if IsAdminInstallMode() then
-        begin
           Exec(PythonExe,
             '/quiet InstallAllUsers=1 PrependPath=1 Include_test=0 Include_pip=1',
-            '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-        end
+            '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
         else
-        begin
           Exec(PythonExe,
             '/quiet InstallAllUsers=0 PrependPath=1 Include_test=0 Include_pip=1',
             '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-        end;
-      end;
+
+        if ResultCode <> 0 then
+          MsgBox(
+            'Python 3.12 installation failed (exit code: ' + IntToStr(ResultCode) + ').' + #13#10 +
+            'Please install Python 3.12 manually from https://www.python.org/' + #13#10 +
+            'then run:  pip install -r "' + AppDir + '\requirements.txt"',
+            mbError, MB_OK);
+      end else
+        MsgBox(
+          'Python installer not found inside the package.' + #13#10 +
+          'Expected path: ' + PythonExe + #13#10 +
+          'Please install Python 3.12 manually.',
+          mbError, MB_OK);
     end;
 
     // ── Step 2: 安装 TAP-Windows 驱动（如果未安装）────────
@@ -288,20 +303,57 @@ begin
       if FileExists(TAPExe) then
       begin
         WizardForm.StatusLabel.Caption := ExpandConstant('{cm:InstallingTAP}');
-        // /S = 静默安装
+        // /S = NSIS 静默安装参数
         Exec(TAPExe, '/S', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      end;
+        if ResultCode <> 0 then
+          MsgBox(
+            'TAP-Windows driver installation failed (exit code: ' + IntToStr(ResultCode) + ').' + #13#10 +
+            'OpenVPN may not work correctly.' + #13#10 +
+            'You can install the TAP driver manually from:' + #13#10 +
+            'https://openvpn.net/community-downloads/',
+            mbError, MB_OK);
+      end else
+        MsgBox(
+          'TAP-Windows installer not found inside the package.' + #13#10 +
+          'Expected path: ' + TAPExe + #13#10 +
+          'Please install the TAP driver manually.',
+          mbError, MB_OK);
     end;
-  end;
 
-  // ── Step 3: 安装完成后的配置 ──────────────────────────
-  if CurStep = ssPostInstall then
-  begin
-    // 创建日志目录（如果不存在）
-    ForceDirectories(ExpandConstant('{app}\logs'));
+    // ── Step 3: 安装 Python 依赖（PyQt5 等）──────────────
+    // 刚装完 Python 后注册表已写入，通过注册表获取完整路径，
+    // 不依赖当前进程的 PATH（新安装的 Python 在本进程中尚未生效）
+    PythonExe := GetPythonExePath();
 
-    // 确保脚本有正确的行尾符（CRLF）
-    // 这里不做额外处理，build_installer.bat 在打包前已处理
+    // 升级 pip（失败不阻断后续步骤）
+    WizardForm.StatusLabel.Caption := 'Upgrading pip...';
+    Exec(PythonExe,
+      '-m pip install --upgrade pip --quiet',
+      AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+    // 从 requirements.txt 安装所有依赖
+    WizardForm.StatusLabel.Caption := ExpandConstant('{cm:InstallingDeps}');
+    if FileExists(AppDir + '\requirements.txt') then
+    begin
+      Exec(PythonExe,
+        '-m pip install -r "' + AppDir + '\requirements.txt" --quiet',
+        AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+      // requirements.txt 安装失败时兜底：直接装 PyQt5
+      if ResultCode <> 0 then
+        Exec(PythonExe,
+          '-m pip install PyQt5 --quiet',
+          AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    end else
+    begin
+      // 找不到 requirements.txt，直接装 PyQt5
+      Exec(PythonExe,
+        '-m pip install PyQt5 --quiet',
+        AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    end;
+
+    // 清空状态栏
+    WizardForm.StatusLabel.Caption := '';
   end;
 end;
 
@@ -321,23 +373,18 @@ begin
   if CurUninstallStep = usUninstall then
   begin
     // ── 停止并删除 OV2NService ───────────────────────────
-    // 先尝试用 NSSM 删除服务
     NSSMPath := ExpandConstant('{app}\resources\nssm\win64\nssm.exe');
     if not FileExists(NSSMPath) then
       NSSMPath := ExpandConstant('{app}\resources\nssm\nssm.exe');
 
     if FileExists(NSSMPath) then
     begin
-      // 先停止服务
-      Exec('net', 'stop OV2NService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      // 再删除服务
+      Exec('net',    'stop OV2NService',          '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
       Exec(NSSMPath, 'remove OV2NService confirm', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    end
-    else
+    end else
     begin
-      // NSSM 不存在时用 sc 删除
-      Exec('net', 'stop OV2NService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      Exec('sc', 'delete OV2NService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec('net', 'stop OV2NService',   '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec('sc',  'delete OV2NService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;
 
     // ── 停止 xray 进程 ────────────────────────────────────
@@ -350,21 +397,14 @@ begin
       KeepData := MsgBox(ExpandConstant('{cm:UninstallKeepData}'),
         mbConfirmation, MB_YESNO) = IDYES;
       if not KeepData then
-      begin
         DelTree(AppDataPath, True, True, True);
-      end;
     end;
   end;
 
-  // ── 卸载完成后删除安装目录 ────────────────────────────
-  // usPostUninstall 在所有文件删除完成后触发，此时再删除
-  // 安装目录本身（Inno Setup 可能因目录非空而无法自动删除）
+  // ── 卸载完成后删除安装目录（处理非空目录残留）────────
   if CurUninstallStep = usPostUninstall then
   begin
     if DirExists(ExpandConstant('{app}')) then
-    begin
       DelTree(ExpandConstant('{app}'), True, True, True);
-    end;
   end;
 end;
-
