@@ -19,11 +19,15 @@ set "PROJECT_ROOT=%CD%"
 echo Project root: %PROJECT_ROOT%
 echo.
 
-REM Read version
-set VERSION=1.4.4
+REM Read version from version.txt (single source of truth)
+set VERSION=
 if exist "version.txt" (
     set /p VERSION=<version.txt
     set VERSION=!VERSION: =!
+)
+if "!VERSION!"=="" (
+    echo [WARN] version.txt not found or empty, using fallback version
+    set VERSION=1.4.2
 )
 echo Version: !VERSION!
 echo.

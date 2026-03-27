@@ -1,13 +1,50 @@
-﻿# 需要管理员权限运行
+﻿param(
+    [string]$ConfigPath = ""
+)
+
+# 需要管理员权限运行
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "error: 请以管理员身份运行"; exit 1
 }
 
-$dir = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $dir
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+# 当脚本位于 resources/xray/ 时，$scriptDir 就是 xrayDir
+# 当脚本位于 scripts/windows/ 时，需要向上两级再进入 resources/xray
+if (Test-Path (Join-Path $scriptDir "xray.exe")) {
+    $xrayDir = $scriptDir
+} else {
+    $projectRoot = Split-Path -Parent (Split-Path -Parent $scriptDir)
+    $xrayDir = Join-Path $projectRoot "resources\xray"
+}
 
-$configPath = Join-Path $dir "config.json"
-if (-not (Test-Path $configPath)) { Write-Host "error: config.json not found"; exit 1 }
+# 配置文件优先级：
+# 1. 命令行传入的 -ConfigPath（用户从 GUI 导入的配置）
+# 2. %APPDATA%\ov2n\config.json（持久化的用户配置）
+# 3. resources\xray\config.json（内置配置）
+$configPath = ""
+if ($ConfigPath -and (Test-Path $ConfigPath)) {
+    $configPath = $ConfigPath
+    Write-Host "使用用户配置: $configPath"
+} else {
+    $appdataConfig = Join-Path $env:APPDATA "ov2n\config.json"
+    if (Test-Path $appdataConfig) {
+        $configPath = $appdataConfig
+        Write-Host "使用 APPDATA 配置: $configPath"
+    } else {
+        $builtinConfig = Join-Path $xrayDir "config.json"
+        if (Test-Path $builtinConfig) {
+            $configPath = $builtinConfig
+            Write-Host "使用内置配置: $configPath"
+        }
+    }
+}
+
+if (-not $configPath -or -not (Test-Path $configPath)) {
+    Write-Host "error: config.json not found (checked: -ConfigPath, APPDATA, resources/xray)"
+    exit 1
+}
+
+Set-Location $xrayDir
 
 # 读取并去掉注释
 $configContent = Get-Content $configPath -Raw -Encoding utf8
@@ -61,8 +98,8 @@ foreach ($ob in $config.outbounds) {
     }
 }
 
-# ★ 关键：无 BOM 的 UTF-8 写入
-$tempConfigPath = Join-Path $dir "config.runtime.json"
+# ★ 关键：无 BOM 的 UTF-8 写入（runtime 配置写到 xrayDir）
+$tempConfigPath = Join-Path $xrayDir "config.runtime.json"
 $jsonContent = $config | ConvertTo-Json -Depth 20
 [System.IO.File]::WriteAllText(
     $tempConfigPath,
@@ -100,8 +137,8 @@ route delete 0.0.0.0 mask 0.0.0.0 10.0.0.0 | Out-Null
 route delete 0.0.0.0 mask 0.0.0.0 10.0.0.1 | Out-Null
 route delete $vpsAddr | Out-Null
 
-# 启动 xray
-$xrayPath = Join-Path $dir "xray.exe"
+# 启动 xray（xray.exe 在 xrayDir 中）
+$xrayPath = Join-Path $xrayDir "xray.exe"
 Start-Process -FilePath $xrayPath -ArgumentList "-config `"$tempConfigPath`"" -WindowStyle Minimized
 Write-Host "xray 已启动，等待 xray-tun 创建..."
 
@@ -117,7 +154,7 @@ do {
 
 if ($null -eq $adapter) {
     Write-Host "error: xray-tun 未出现，请手动运行查看报错："
-    Write-Host "  .\xray.exe -config .\config.runtime.json"
+    Write-Host "  .\\xray.exe -config .\\config.runtime.json"
     exit 1
 }
 Write-Host "xray-tun 已出现 (${waited}s)"

@@ -6,7 +6,11 @@
 ; ============================================================
 
 #define MyAppName      "ov2n"
-#define MyAppVersion   "1.4.3"
+; MyAppVersion can be overridden via /DMyAppVersion="x.y.z" on ISCC command line.
+; The default here should match version.txt (single source of truth).
+#ifndef MyAppVersion
+  #define MyAppVersion   "1.4.2"
+#endif
 #define MyAppPublisher "Alfiy"
 #define MyAppURL       "https://github.com/alfiy/pyQt_vpnv2ray_client"
 #define MyAppExeName   "ov2n_launcher.vbs"

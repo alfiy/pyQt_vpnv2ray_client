@@ -77,13 +77,23 @@ WIN_BUILD_DIR="${BUILD_DIR}/windows"
 DIST_DIR="dist"
 
 ########################################
-# Auto version from git tag
+# Auto version: version.txt > git tag > fallback
 ########################################
 if [ -z "$VERSION" ]; then
-    if git describe --tags --abbrev=0 >/dev/null 2>&1; then
-        VERSION=$(git describe --tags --abbrev=0)
-    else
-        VERSION="1.3.0"
+    # Priority 1: Read from version.txt (single source of truth)
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -f "${SCRIPT_DIR}/version.txt" ]; then
+        VERSION="$(tr -d '[:space:]' < "${SCRIPT_DIR}/version.txt")"
+    fi
+    # Priority 2: Git tag
+    if [ -z "$VERSION" ]; then
+        if git describe --tags --abbrev=0 >/dev/null 2>&1; then
+            VERSION=$(git describe --tags --abbrev=0)
+        fi
+    fi
+    # Priority 3: Fallback
+    if [ -z "$VERSION" ]; then
+        VERSION="1.4.2"
     fi
 fi
 

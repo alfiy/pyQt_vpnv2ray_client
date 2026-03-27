@@ -40,6 +40,9 @@ _CONFIG_DIR = _get_config_dir()
 TPROXY_CONF_PATH    = os.path.join(_CONFIG_DIR, "tproxy.conf")
 IMPORTED_FLAGS_FILE = os.path.join(_CONFIG_DIR, "imported_flags.json")
 
+# 旧版本遗留的配置路径文件（用于迁移）
+_LEGACY_CONFIG_PATHS_FILE = os.path.join(_CONFIG_DIR, "config_paths.json")
+
 # 用户配置文件的固定存储位置（导入时复制到此处）
 USER_VPN_CONFIG   = os.path.join(_CONFIG_DIR, "client.ovpn")
 USER_V2RAY_CONFIG = os.path.join(_CONFIG_DIR, "config.json")
@@ -368,9 +371,108 @@ def create_default_v2ray_config(config_path: str) -> None:
         print(f"创建默认 V2Ray 配置失败: {e}")
 
 
+def _migrate_legacy_config_paths() -> None:
+    """
+    从旧版本的 config_paths.json 迁移配置文件到新的固定位置。
+
+    旧版本将用户选择的配置文件路径保存在 config_paths.json 中，
+    配置文件本身可能存储在任意位置（如用户的下载目录）。
+    新版本要求配置文件统一存储在用户配置目录下。
+
+    迁移逻辑：
+      1. 读取 config_paths.json 中保存的旧路径
+      2. 如果旧路径指向的文件存在且目标位置没有有效文件，则复制过来
+      3. 迁移完成后删除 config_paths.json，避免重复迁移
+      4. 同步更新 imported_flags.json
+    """
+    if not os.path.exists(_LEGACY_CONFIG_PATHS_FILE):
+        return
+
+    print("[ov2n] 检测到旧版 config_paths.json，开始迁移...")
+
+    try:
+        with open(_LEGACY_CONFIG_PATHS_FILE, 'r', encoding='utf-8') as f:
+            saved = json.load(f)
+    except Exception as e:
+        print(f"[ov2n] ⚠ 读取旧版 config_paths.json 失败: {e}")
+        # 读取失败也删除，避免每次启动都尝试
+        _remove_legacy_config_paths_file()
+        return
+
+    old_vpn_path = saved.get('vpn_config', '')
+    old_v2ray_path = saved.get('v2ray_config', '')
+
+    migrated_vpn = False
+    migrated_v2ray = False
+
+    # 迁移 VPN 配置
+    if (old_vpn_path
+            and os.path.exists(old_vpn_path)
+            and os.path.realpath(old_vpn_path) != os.path.realpath(USER_VPN_CONFIG)):
+        # 目标位置没有文件或文件为空 → 复制
+        if not os.path.exists(USER_VPN_CONFIG) or os.path.getsize(USER_VPN_CONFIG) == 0:
+            try:
+                shutil.copy2(old_vpn_path, USER_VPN_CONFIG)
+                print(f"[ov2n] ✓ VPN 配置已迁移: {old_vpn_path} → {USER_VPN_CONFIG}")
+                migrated_vpn = True
+            except Exception as e:
+                print(f"[ov2n] ⚠ VPN 配置迁移失败: {e}")
+        else:
+            print(f"[ov2n] VPN 配置已存在于目标位置，跳过迁移")
+            migrated_vpn = True  # 文件已在正确位置
+    elif old_vpn_path and os.path.realpath(old_vpn_path) == os.path.realpath(USER_VPN_CONFIG):
+        # 旧路径就是新路径（已经在正确位置）
+        if os.path.exists(USER_VPN_CONFIG) and os.path.getsize(USER_VPN_CONFIG) > 0:
+            migrated_vpn = True
+
+    # 迁移 V2Ray 配置
+    if (old_v2ray_path
+            and os.path.exists(old_v2ray_path)
+            and os.path.realpath(old_v2ray_path) != os.path.realpath(USER_V2RAY_CONFIG)):
+        # 目标位置没有文件或文件为空 → 复制
+        if not os.path.exists(USER_V2RAY_CONFIG) or os.path.getsize(USER_V2RAY_CONFIG) == 0:
+            try:
+                shutil.copy2(old_v2ray_path, USER_V2RAY_CONFIG)
+                print(f"[ov2n] ✓ V2Ray 配置已迁移: {old_v2ray_path} → {USER_V2RAY_CONFIG}")
+                migrated_v2ray = True
+            except Exception as e:
+                print(f"[ov2n] ⚠ V2Ray 配置迁移失败: {e}")
+        else:
+            print(f"[ov2n] V2Ray 配置已存在于目标位置，跳过迁移")
+            migrated_v2ray = True  # 文件已在正确位置
+    elif old_v2ray_path and os.path.realpath(old_v2ray_path) == os.path.realpath(USER_V2RAY_CONFIG):
+        # 旧路径就是新路径（已经在正确位置）
+        if os.path.exists(USER_V2RAY_CONFIG) and os.path.getsize(USER_V2RAY_CONFIG) > 0:
+            migrated_v2ray = True
+
+    # 同步更新 imported_flags
+    if migrated_vpn or migrated_v2ray:
+        flags = load_imported_flags()
+        if migrated_vpn and not flags['vpn']:
+            flags['vpn'] = True
+        if migrated_v2ray and not flags['v2ray']:
+            flags['v2ray'] = True
+        save_imported_flags(flags['vpn'], flags['v2ray'])
+        print(f"[ov2n] 导入标志已更新: vpn={flags['vpn']}, v2ray={flags['v2ray']}")
+
+    # 删除旧版文件，避免重复迁移
+    _remove_legacy_config_paths_file()
+    print("[ov2n] ✓ 旧版 config_paths.json 迁移完成")
+
+
+def _remove_legacy_config_paths_file() -> None:
+    """安全删除旧版 config_paths.json。"""
+    try:
+        if os.path.exists(_LEGACY_CONFIG_PATHS_FILE):
+            os.remove(_LEGACY_CONFIG_PATHS_FILE)
+            print(f"[ov2n] 已删除旧版 config_paths.json")
+    except Exception as e:
+        print(f"[ov2n] ⚠ 删除旧版 config_paths.json 失败: {e}")
+
+
 def init_config_dir() -> None:
     """
-    初始化用户配置目录。
+    初始化用户配置目录并执行必要的迁移。
 
     设计原则：
       - 程序第一次启动时，用户配置目录下没有任何配置文件，这是正常状态
@@ -380,6 +482,13 @@ def init_config_dir() -> None:
         2. 拖拽文件到窗口
         3. 从剪贴板导入 ss:// 链接
       - 导入后，配置文件会被复制到用户配置目录下永久保存
+
+    迁移逻辑：
+      - 如果检测到旧版 config_paths.json，自动将旧路径指向的配置文件
+        复制到新的固定位置，确保升级后不丢失用户配置
     """
     os.makedirs(_CONFIG_DIR, exist_ok=True)
     print(f"[ov2n] 用户配置目录: {_CONFIG_DIR}")
+
+    # 执行旧版本迁移（如果需要）
+    _migrate_legacy_config_paths()

@@ -24,6 +24,36 @@ import urllib.request
 import socket
 
 
+# ============ 版本信息 ============
+_VERSION_CACHE = None
+
+def _get_version():
+    """
+    从 version.txt 读取版本号 (单一版本来源)
+    按优先级搜索: 脚本同级目录的上层 > /usr/local/lib/ov2n > 兜底值
+    """
+    global _VERSION_CACHE
+    if _VERSION_CACHE is not None:
+        return _VERSION_CACHE
+
+    search_paths = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "version.txt"),
+        "/usr/local/lib/ov2n/version.txt",
+    ]
+    for path in search_paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                ver = f.read().strip()
+                if ver:
+                    _VERSION_CACHE = ver
+                    return ver
+        except (OSError, IOError):
+            continue
+
+    _VERSION_CACHE = "1.4.2"
+    return _VERSION_CACHE
+
+
 # ============ 调试日志 ============
 DEBUG_LOG = "/tmp/vpn-helper-debug.log"
 
@@ -189,7 +219,7 @@ def download_with_timeout(url, timeout=30):
         
         req = urllib.request.Request(
             url,
-            headers={'User-Agent': 'OV2N-VPN-Helper/1.4.0'}
+            headers={'User-Agent': f'OV2N-VPN-Helper/{_get_version()}'}
         )
         
         with urllib.request.urlopen(req, timeout=timeout) as response:
@@ -389,7 +419,7 @@ def check_geo_updates_async():
             req = urllib.request.Request(
                 url,
                 method='HEAD',
-                headers={'User-Agent': 'OV2N-VPN-Helper/1.4.0'}
+                headers={'User-Agent': f'OV2N-VPN-Helper/{_get_version()}'}
             )
             
             # 使用较短的超时检查

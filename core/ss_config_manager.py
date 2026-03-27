@@ -15,7 +15,7 @@ import re
 import base64
 import urllib.parse
 from typing import List, Dict, Optional, Tuple
-from PyQt5.QtWidgets import QMessageBox, QApplication
+from PyQt5.QtWidgets import QMessageBox
 
 
 class ShadowsocksServer:
@@ -519,7 +519,7 @@ class SSConfigDialog:
 
 def import_ss_url_from_clipboard(parent, config_path: str, 
                                   replace_existing: bool = True) -> bool:
-    
+    from PyQt5.QtWidgets import QApplication
     
     clipboard = QApplication.clipboard()
     text = clipboard.text()
