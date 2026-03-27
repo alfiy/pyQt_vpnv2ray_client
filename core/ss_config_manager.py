@@ -7,6 +7,7 @@ SS URL 配置管理器 (修复版)
 - 支持混合格式: ss://base64@server:port
 - 增强调试信息
 - 修复 warn_legacy 误判：只有完全Base64且解码后含@的才是真正遗留格式
+- V2RayConfigManager._load_config 支持含 // 注释的 JSON（xray 模板格式）
 """
 import json
 import os
@@ -14,7 +15,7 @@ import re
 import base64
 import urllib.parse
 from typing import List, Dict, Optional, Tuple
-from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtWidgets import QMessageBox, QApplication
 
 
 class ShadowsocksServer:
@@ -357,17 +358,52 @@ class V2RayConfigManager:
         self.config_path = config_path
         self.config = self._load_config()
     
+    @staticmethod
+    def _strip_json_comments(text: str) -> str:
+        """移除 JSON 中的单行注释（// 开头的行）。
+        与 config_manager._strip_json_comments 保持一致，
+        用于支持 xray 模板中含注释的 config.json。"""
+        return re.sub(r'(?m)^\s*//.*$', '', text)
+
     def _load_config(self) -> Dict:
+        """加载配置文件，支持含 // 单行注释的 JSON（xray 模板格式）。
+
+        加载策略：
+          1. 先尝试标准 json.load（大多数情况）
+          2. 失败时用 _strip_json_comments 去除注释后重试
+          3. 仍然失败才回退到 DEFAULT_CONFIG
+        """
         if os.path.exists(self.config_path):
             try:
-                with open(self.config_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                with open(self.config_path, 'r', encoding='utf-8-sig') as f:
+                    raw = f.read()
             except Exception as e:
-                print(f"加载配置失败，使用默认配置: {e}")
+                print(f"读取配置文件失败: {e}")
                 return self.DEFAULT_CONFIG.copy()
+
+            # 尝试1: 标准 JSON 解析
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+
+            # 尝试2: 去除 // 注释后解析
+            try:
+                stripped = self._strip_json_comments(raw)
+                return json.loads(stripped)
+            except json.JSONDecodeError as e:
+                print(f"加载配置失败（含注释处理后仍无法解析），使用默认配置: {e}")
+                return self.DEFAULT_CONFIG.copy()
+
         return self.DEFAULT_CONFIG.copy()
     
     def save_config(self) -> bool:
+        """保存配置到文件。
+
+        注意：save_config 会将 self.config（纯 JSON dict）写回文件，
+        这意味着原始文件中的 // 注释会被移除。这是预期行为——
+        通过 SS URL 导入或手动编辑后的配置不再需要注释。
+        """
         try:
             os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
             with open(self.config_path, 'w', encoding='utf-8') as f:
@@ -483,7 +519,7 @@ class SSConfigDialog:
 
 def import_ss_url_from_clipboard(parent, config_path: str, 
                                   replace_existing: bool = True) -> bool:
-    from PyQt5.QtWidgets import QApplication
+    
     
     clipboard = QApplication.clipboard()
     text = clipboard.text()

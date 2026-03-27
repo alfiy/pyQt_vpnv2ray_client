@@ -1,17 +1,19 @@
 """
 配置管理模块
 负责所有配置文件的加载、保存、验证和提取逻辑，包括：
-- 用户配置路径持久化 (config_paths.json)
+- 用户配置文件的复制与持久化存储
 - 导入标志持久化 (imported_flags.json)
 - TProxy 配置持久化 (tproxy.conf)
 - V2Ray 配置验证与默认配置创建
 - 从 V2Ray 配置中提取 TProxy 参数
 
+核心设计原则：
+  用户导入配置时，将配置文件**复制**到用户配置目录下，而非仅保存路径。
+  这样即使用户删除了原始文件，程序仍能从用户配置目录读取正确的配置。
+
 跨平台说明：
-  Linux   → 配置存储在 ~/.config/ov2n/（原有逻辑不变）
+  Linux   → 配置存储在 ~/.config/ov2n/
   Windows → 配置存储在 %APPDATA%\ov2n\
-            validate_v2ray_config 支持含 // 注释的 JSON（xray Windows 模板格式）
-            init_config_files 对已存在且有效的文件绝不覆盖
 """
 import json
 import os
@@ -36,11 +38,26 @@ def _get_config_dir() -> str:
 _CONFIG_DIR = _get_config_dir()
 
 TPROXY_CONF_PATH    = os.path.join(_CONFIG_DIR, "tproxy.conf")
-CONFIG_PATHS_FILE   = os.path.join(_CONFIG_DIR, "config_paths.json")
 IMPORTED_FLAGS_FILE = os.path.join(_CONFIG_DIR, "imported_flags.json")
 
-DEFAULT_VPN_CONFIG   = os.path.join(_CONFIG_DIR, "client.ovpn")
-DEFAULT_V2RAY_CONFIG = os.path.join(_CONFIG_DIR, "config.json")
+# 用户配置文件的固定存储位置（导入时复制到此处）
+USER_VPN_CONFIG   = os.path.join(_CONFIG_DIR, "client.ovpn")
+USER_V2RAY_CONFIG = os.path.join(_CONFIG_DIR, "config.json")
+
+
+def get_config_dir() -> str:
+    """获取用户配置目录路径（供外部模块使用）。"""
+    return _CONFIG_DIR
+
+
+def get_user_vpn_config_path() -> str:
+    """获取用户 VPN 配置文件的固定存储路径。"""
+    return USER_VPN_CONFIG
+
+
+def get_user_v2ray_config_path() -> str:
+    """获取用户 V2Ray 配置文件的固定存储路径。"""
+    return USER_V2RAY_CONFIG
 
 
 # ============================================
@@ -71,43 +88,69 @@ def save_imported_flags(vpn_imported: bool, v2ray_imported: bool) -> None:
 
 
 # ============================================
-# 配置路径 (config_paths.json)
+# 配置文件导入（复制到用户目录）
 # ============================================
 
-def load_config_paths() -> Dict[str, str]:
-    """加载已保存的 VPN 和 V2Ray 配置文件路径。"""
-    defaults = {
-        'vpn_config': DEFAULT_VPN_CONFIG,
-        'v2ray_config': DEFAULT_V2RAY_CONFIG,
-    }
-    if not os.path.exists(CONFIG_PATHS_FILE):
-        return defaults
-    try:
-        with open(CONFIG_PATHS_FILE, 'r', encoding='utf-8') as f:
-            saved = json.load(f)
-        vpn   = saved.get('vpn_config',   defaults['vpn_config'])
-        v2ray = saved.get('v2ray_config', defaults['v2ray_config'])
-        return {
-            'vpn_config':   vpn   if os.path.exists(vpn)   else defaults['vpn_config'],
-            'v2ray_config': v2ray if os.path.exists(v2ray) else defaults['v2ray_config'],
-        }
-    except Exception as e:
-        print(f"加载配置路径失败: {e}")
-        return defaults
+def import_vpn_config(source_path: str) -> str:
+    """
+    将用户选择的 VPN 配置文件复制到用户配置目录。
+
+    Args:
+        source_path: 用户选择的源文件路径
+
+    Returns:
+        复制后的目标文件路径（即 USER_VPN_CONFIG）
+
+    Raises:
+        FileNotFoundError: 源文件不存在
+        OSError: 复制失败
+    """
+    if not os.path.exists(source_path):
+        raise FileNotFoundError(f"源文件不存在: {source_path}")
+
+    os.makedirs(_CONFIG_DIR, exist_ok=True)
+
+    # 如果源文件和目标文件是同一个文件，无需复制
+    src_real = os.path.realpath(source_path)
+    dst_real = os.path.realpath(USER_VPN_CONFIG)
+    if src_real != dst_real:
+        shutil.copy2(source_path, USER_VPN_CONFIG)
+        print(f"✓ VPN 配置已复制到: {USER_VPN_CONFIG}")
+    else:
+        print(f"✓ VPN 配置已在用户目录中: {USER_VPN_CONFIG}")
+
+    return USER_VPN_CONFIG
 
 
-def save_config_paths(vpn_config: str, v2ray_config: str) -> None:
-    """保存 VPN 和 V2Ray 配置文件路径。"""
-    try:
-        os.makedirs(os.path.dirname(CONFIG_PATHS_FILE), exist_ok=True)
-        with open(CONFIG_PATHS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(
-                {'vpn_config': vpn_config, 'v2ray_config': v2ray_config},
-                f, indent=2, ensure_ascii=False,
-            )
-        print("✓ 配置路径已保存")
-    except Exception as e:
-        print(f"保存配置路径失败: {e}")
+def import_v2ray_config(source_path: str) -> str:
+    """
+    将用户选择的 V2Ray 配置文件复制到用户配置目录。
+
+    Args:
+        source_path: 用户选择的源文件路径
+
+    Returns:
+        复制后的目标文件路径（即 USER_V2RAY_CONFIG）
+
+    Raises:
+        FileNotFoundError: 源文件不存在
+        OSError: 复制失败
+    """
+    if not os.path.exists(source_path):
+        raise FileNotFoundError(f"源文件不存在: {source_path}")
+
+    os.makedirs(_CONFIG_DIR, exist_ok=True)
+
+    # 如果源文件和目标文件是同一个文件，无需复制
+    src_real = os.path.realpath(source_path)
+    dst_real = os.path.realpath(USER_V2RAY_CONFIG)
+    if src_real != dst_real:
+        shutil.copy2(source_path, USER_V2RAY_CONFIG)
+        print(f"✓ V2Ray 配置已复制到: {USER_V2RAY_CONFIG}")
+    else:
+        print(f"✓ V2Ray 配置已在用户目录中: {USER_V2RAY_CONFIG}")
+
+    return USER_V2RAY_CONFIG
 
 
 # ============================================
@@ -178,7 +221,7 @@ def extract_tproxy_config_from_v2ray(config_path: str) -> Optional[Dict]:
     if not os.path.exists(config_path):
         return None
     try:
-        with open(config_path, 'r', encoding='utf-8') as f:
+        with open(config_path, 'r', encoding='utf-8-sig') as f:
             raw = f.read()
 
         # 支持含注释的 JSON（xray Windows 模板）
@@ -224,14 +267,64 @@ def validate_v2ray_config(path: str) -> bool:
     """
     验证 V2Ray 配置文件是否有效（非空且包含 inbounds/outbounds）。
     支持含 // 单行注释的 JSON（xray Windows 模板格式）。
+
+    增强容错：
+      - 支持 UTF-8 BOM 编码
+      - 捕获文件锁定、权限不足等 OS 异常
+      - 空文件直接返回 False
     """
     try:
+        if not os.path.exists(path):
+            return False
         if os.path.getsize(path) == 0:
             return False
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8-sig') as f:
             raw = f.read()
+        if not raw.strip():
+            return False
         cfg = json.loads(_strip_json_comments(raw))
         return 'inbounds' in cfg and 'outbounds' in cfg
+    except (OSError, IOError) as e:
+        # 文件被锁定、权限不足等 → 不能确定无效，返回 True 以避免误覆盖
+        print(f"⚠ 读取 V2Ray 配置时发生 IO 错误（视为有效以保护数据）: {e}")
+        return True
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"⚠ V2Ray 配置 JSON 解析失败: {e}")
+        return False
+    except Exception as e:
+        print(f"⚠ V2Ray 配置验证异常: {e}")
+        return False
+
+
+def has_real_vps_config(path: str) -> bool:
+    """
+    检查 V2Ray 配置文件是否包含真实的 VPS 服务器信息（非占位符）。
+
+    用于判断用户是否已经成功导入过有效的 SS/V2Ray 配置。
+    占位符地址包括：your.server.com, YOUR_VPS_IP, 127.0.0.1, placeholder 等。
+
+    Returns:
+        True  - 配置中包含看起来真实的 VPS 地址
+        False - 配置中只有占位符或无法解析
+    """
+    placeholder_addresses = {
+        "your.server.com", "your_vps_ip", "127.0.0.1",
+        "0.0.0.0", "localhost", "example.com",
+    }
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return False
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            raw = f.read()
+        cfg = json.loads(_strip_json_comments(raw))
+        for ob in cfg.get('outbounds', []):
+            if ob.get('protocol') in ('shadowsocks', 'vmess', 'vless', 'trojan'):
+                servers = ob.get('settings', {}).get('servers', [])
+                for srv in servers:
+                    addr = srv.get('address', '').strip().lower()
+                    if addr and addr not in placeholder_addresses:
+                        return True
+        return False
     except Exception:
         return False
 
@@ -275,57 +368,18 @@ def create_default_v2ray_config(config_path: str) -> None:
         print(f"创建默认 V2Ray 配置失败: {e}")
 
 
-def init_config_files(vpn_config_path: str, v2ray_config_path: str) -> None:
+def init_config_dir() -> None:
     """
-    初始化配置文件。
+    初始化用户配置目录。
 
-    设计原则（Linux / Windows 一致）：
-      1. 文件不存在 → 从开发目录复制，复制失败才创建默认模板
-      2. 文件存在且有效 → 绝不覆盖（用户自定义配置受保护）
-      3. 文件存在但无效（损坏/空文件）→ 备份后重建默认模板
-
-    Windows 额外说明：
-      - 用户从 GUI 导入配置后，路径保存在 %APPDATA%\ov2n\config_paths.json
-      - v2ray_config_path 指向用户导入的文件，validate 支持含注释的 JSON
-      - 因此正常情况下不会触发重建
+    设计原则：
+      - 程序第一次启动时，用户配置目录下没有任何配置文件，这是正常状态
+      - 不再从开发目录复制模板文件，也不再自动创建默认配置
+      - 用户需要通过以下方式导入配置：
+        1. 通过文件选择器选择 .ovpn 或 config.json
+        2. 拖拽文件到窗口
+        3. 从剪贴板导入 ss:// 链接
+      - 导入后，配置文件会被复制到用户配置目录下永久保存
     """
-    app_root = get_app_root()
-    dev_vpn   = os.path.join(app_root, "core", "openvpn", "client.ovpn")
-    dev_v2ray = os.path.join(app_root, "core", "xray",   "config.json")
-
-    user_cfg_dir = os.path.dirname(v2ray_config_path)
-    os.makedirs(user_cfg_dir, exist_ok=True)
-
-    # ── V2Ray 配置初始化 ────────────────────────────
-    if not os.path.exists(v2ray_config_path):
-        # 文件不存在：从开发目录复制，复制失败才创建默认模板
-        if os.path.exists(dev_v2ray):
-            try:
-                shutil.copy2(dev_v2ray, v2ray_config_path)
-                print(f"✓ 已从开发目录复制 V2Ray 配置")
-            except Exception as e:
-                print(f"复制 V2Ray 配置失败: {e}")
-                create_default_v2ray_config(v2ray_config_path)
-        else:
-            create_default_v2ray_config(v2ray_config_path)
-
-    elif not validate_v2ray_config(v2ray_config_path):
-        # 文件存在但无效（损坏/空）：备份后重建
-        # 注意：含注释的 JSON 在 validate_v2ray_config 中已经能正确处理，
-        # 因此用户的 xray Windows 格式配置不会触发此分支
-        backup_path = v2ray_config_path + ".backup"
-        try:
-            shutil.copy2(v2ray_config_path, backup_path)
-            print(f"⚠ V2Ray 配置无效，已备份至 {backup_path}")
-        except Exception:
-            pass
-        create_default_v2ray_config(v2ray_config_path)
-
-    # else: 文件存在且有效 → 什么都不做，完全保留用户配置
-
-    # ── VPN 配置初始化 ──────────────────────────────
-    if not os.path.exists(vpn_config_path) and os.path.exists(dev_vpn):
-        try:
-            shutil.copy2(dev_vpn, vpn_config_path)
-        except Exception:
-            pass
+    os.makedirs(_CONFIG_DIR, exist_ok=True)
+    print(f"[ov2n] 用户配置目录: {_CONFIG_DIR}")

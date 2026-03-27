@@ -20,7 +20,7 @@ echo Project root: %PROJECT_ROOT%
 echo.
 
 REM Read version
-set VERSION=1.4.3
+set VERSION=1.4.4
 if exist "version.txt" (
     set /p VERSION=<version.txt
     set VERSION=!VERSION: =!

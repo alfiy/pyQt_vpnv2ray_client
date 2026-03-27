@@ -3,6 +3,10 @@
 职责：UI 构建、事件处理、状态显示
 配置管理、工作线程、样式定义已分别抽离到独立模块
 
+核心设计变更：
+  用户导入配置时，将配置文件复制到用户配置目录下（~/.config/ov2n/ 或 %APPDATA%\ov2n\），
+  而非仅保存路径。这样即使用户删除了原始文件，程序仍能正常工作。
+
 跨平台兼容改动:
 1. 用 icon_helper.btn_text() 替换所有硬编码 emoji
 2. 用 icon_helper.load_window_icon() 多路径探测窗口图标
@@ -26,9 +30,11 @@ from PyQt5.QtWidgets import (
 
 from core.config_manager import (
     load_imported_flags, save_imported_flags,
-    load_config_paths, save_config_paths,
     load_tproxy_config, save_tproxy_config,
-    extract_tproxy_config_from_v2ray, init_config_files,
+    extract_tproxy_config_from_v2ray, init_config_dir,
+    has_real_vps_config, validate_v2ray_config,
+    import_vpn_config, import_v2ray_config,
+    get_user_vpn_config_path, get_user_v2ray_config_path,
 )
 from core.utils import get_app_root, validate_ip
 from core.worker import SingleVPNThread, SingleV2RayThread, CombinedStartThread
@@ -82,18 +88,56 @@ class MainWindow(QMainWindow):
         # ── 构建 UI ──────────────────────────────
         self._build_ui()
 
-        # ── 配置路径 & 初始化 ─────────────────────
-        # 首次运行：imported_flags 均为 False，路径为默认空值
-        # 再次运行：从持久化存储恢复上次的路径和导入状态
+        # ── 初始化用户配置目录 ─────────────────────
+        init_config_dir()
+
+        # ── 配置路径（固定位于用户配置目录下）─────────
+        self.vpn_config_path = get_user_vpn_config_path()
+        self.v2ray_config_path = get_user_v2ray_config_path()
+
+        # ── 导入状态 ──────────────────────────────
+        # 首次运行：imported_flags 均为 False，用户配置目录下无配置文件
+        # 再次运行：从持久化存储恢复导入状态
         flags = load_imported_flags()
         self.vpn_config_imported = flags['vpn']
         self.v2ray_config_imported = flags['v2ray']
 
-        paths = load_config_paths()
-        self.vpn_config_path = paths['vpn_config']
-        self.v2ray_config_path = paths['v2ray_config']
+        # ── 启动时校验：同步导入标志与实际文件状态 ──
+        # 场景1: imported_flags 残留 True 但文件已不存在
+        #         （理论上不应发生，因为文件在用户配置目录下由程序管理）
+        #         → 重置为 False
+        # 场景2: imported_flags 为 False 但文件存在且包含真实 VPS 配置
+        #         （如 imported_flags.json 丢失/损坏）→ 恢复为 True
+        flags_changed = False
 
-        init_config_files(self.vpn_config_path, self.v2ray_config_path)
+        if self.vpn_config_imported and not os.path.exists(self.vpn_config_path):
+            print(f"[ov2n] ⚠ VPN 配置文件不存在，重置导入标志: {self.vpn_config_path}")
+            self.vpn_config_imported = False
+            flags_changed = True
+
+        if self.v2ray_config_imported and not os.path.exists(self.v2ray_config_path):
+            print(f"[ov2n] ⚠ V2Ray 配置文件不存在，重置导入标志: {self.v2ray_config_path}")
+            self.v2ray_config_imported = False
+            flags_changed = True
+
+        # 恢复丢失的导入标志：文件存在且包含真实 VPS 配置 → 视为已导入
+        if (not self.v2ray_config_imported
+                and os.path.exists(self.v2ray_config_path)
+                and has_real_vps_config(self.v2ray_config_path)):
+            print(f"[ov2n] ✓ V2Ray 配置包含真实 VPS 信息，恢复导入标志")
+            self.v2ray_config_imported = True
+            flags_changed = True
+
+        if (not self.vpn_config_imported
+                and os.path.exists(self.vpn_config_path)
+                and os.path.getsize(self.vpn_config_path) > 0):
+            print(f"[ov2n] ✓ VPN 配置文件存在且非空，恢复导入标志")
+            self.vpn_config_imported = True
+            flags_changed = True
+
+        if flags_changed:
+            save_imported_flags(self.vpn_config_imported, self.v2ray_config_imported)
+
         self._update_config_display()
         self._auto_extract_tproxy_config()
         self._refresh_buttons()
@@ -357,22 +401,42 @@ class MainWindow(QMainWindow):
     # 配置导入（拖拽 + 文件选择 + 剪贴板）
     # ══════════════════════════════════════════
 
-    def _on_vpn_config_imported(self, path: str):
-        self.vpn_config_path = path
+    def _on_vpn_config_imported(self, source_path: str):
+        """
+        处理 VPN 配置导入：将源文件复制到用户配置目录。
+
+        Args:
+            source_path: 用户选择/拖拽的源文件路径
+        """
+        try:
+            import_vpn_config(source_path)
+        except Exception as e:
+            QMessageBox.critical(self, "导入失败", f"复制 VPN 配置文件失败:\n{e}")
+            return
+
         self.vpn_config_imported = True
         save_imported_flags(self.vpn_config_imported, self.v2ray_config_imported)
-        self.vpn_drop_area.setText(f"{check_mark()}{os.path.basename(path)}")
+        self.vpn_drop_area.setText(f"{check_mark()}{os.path.basename(source_path)}")
         self.vpn_drop_area.setStyleSheet(drop_area_ok_style())
-        save_config_paths(self.vpn_config_path, self.v2ray_config_path)
 
-    def _on_v2ray_config_imported(self, path: str):
-        self.v2ray_config_path = path
+    def _on_v2ray_config_imported(self, source_path: str):
+        """
+        处理 V2Ray 配置导入：将源文件复制到用户配置目录。
+
+        Args:
+            source_path: 用户选择/拖拽的源文件路径
+        """
+        try:
+            import_v2ray_config(source_path)
+        except Exception as e:
+            QMessageBox.critical(self, "导入失败", f"复制 V2Ray 配置文件失败:\n{e}")
+            return
+
         self.v2ray_config_imported = True
         save_imported_flags(self.vpn_config_imported, self.v2ray_config_imported)
-        self.v2ray_drop_area.setText(f"{check_mark()}{os.path.basename(path)}")
+        self.v2ray_drop_area.setText(f"{check_mark()}{os.path.basename(source_path)}")
         self.v2ray_drop_area.setStyleSheet(drop_area_ok_style(pad="15px"))
         self._auto_extract_tproxy_config()
-        save_config_paths(self.vpn_config_path, self.v2ray_config_path)
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
@@ -396,9 +460,7 @@ class MainWindow(QMainWindow):
                 self, "错误", "不支持的文件类型!\n请拖拽 .ovpn 或 .json 文件")
 
     def select_vpn_config(self):
-        start = (os.path.dirname(self.vpn_config_path)
-                 if os.path.exists(self.vpn_config_path)
-                 else os.path.expanduser("~"))
+        start = os.path.expanduser("~")
         path, _ = QFileDialog.getOpenFileName(
             self, "选择 OpenVPN 配置文件", start,
             "OVPN 文件 (*.ovpn);;所有文件 (*)")
@@ -406,9 +468,7 @@ class MainWindow(QMainWindow):
             self._on_vpn_config_imported(path)
 
     def select_v2ray_config(self):
-        start = (os.path.dirname(self.v2ray_config_path)
-                 if os.path.exists(self.v2ray_config_path)
-                 else os.path.expanduser("~"))
+        start = os.path.expanduser("~")
         path, _ = QFileDialog.getOpenFileName(
             self, "选择 V2Ray 配置文件", start,
             "JSON 文件 (*.json);;所有文件 (*)")
@@ -416,16 +476,23 @@ class MainWindow(QMainWindow):
             self._on_v2ray_config_imported(path)
 
     def import_ss_from_clipboard(self):
+        """从剪贴板导入 SS URL，生成的配置直接保存到用户配置目录。"""
         try:
             os.makedirs(os.path.dirname(self.v2ray_config_path), exist_ok=True)
         except Exception as e:
             QMessageBox.critical(self, "错误", f"无法创建配置目录: {e}")
             return
+
+        # import_ss_url_from_clipboard 会将配置写入 self.v2ray_config_path
+        # 由于 self.v2ray_config_path 已经指向用户配置目录，无需额外复制
         if import_ss_url_from_clipboard(
                 self, self.v2ray_config_path, replace_existing=True):
-            self._on_v2ray_config_imported(self.v2ray_config_path)
+            self.v2ray_config_imported = True
+            save_imported_flags(self.vpn_config_imported, self.v2ray_config_imported)
             self.v2ray_drop_area.setText(
                 f"{check_mark()}{os.path.basename(self.v2ray_config_path)} (已更新)")
+            self.v2ray_drop_area.setStyleSheet(drop_area_ok_style(pad="15px"))
+            self._auto_extract_tproxy_config()
             QMessageBox.information(
                 self, "成功",
                 "配置已更新，透明代理参数已自动提取。\n如需应用，请重启 V2Ray。")
