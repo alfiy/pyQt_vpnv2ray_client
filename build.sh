@@ -479,7 +479,7 @@ UNINSTALL_ENTRY
         echo ""
 
         # Convert all .bat and .ps1 files to Windows CRLF line endings
-        echo -e "${YELLOW}[7/8] Converting scripts to Windows line endings (CRLF)...${NC}"
+        echo -e "${YELLOW}[7/10] Converting scripts to Windows line endings (CRLF)...${NC}"
         local crlf_count=0
         while IFS= read -r -d '' batfile; do
             if command -v unix2dos &>/dev/null; then
@@ -495,7 +495,7 @@ UNINSTALL_ENTRY
         echo ""
 
         # Package as ZIP
-        echo -e "${YELLOW}[8/8] Creating ZIP package...${NC}"
+        echo -e "${YELLOW}[8/10] Creating ZIP package...${NC}"
         local ZIP_FILE="${DIST_DIR}/${PKG_NAME}_${VERSION}_windows.zip"
 
         if command -v zip &>/dev/null; then
@@ -511,6 +511,210 @@ UNINSTALL_ENTRY
 
         local SIZE=$(du -h "${ZIP_FILE}" | cut -f1)
         echo -e "${GREEN}  ✓ Package created: ${ZIP_FILE} (${SIZE})${NC}"
+        echo ""
+
+        # ── 生成 Inno Setup 所需的启动器文件（项目根目录）──────
+        echo -e "${YELLOW}[9/10] Generating launcher files for Inno Setup...${NC}"
+
+        # 生成 ov2n_launcher.vbs（Inno Setup 的 MyAppExeName 引用此文件）
+        # 使用 base64 解码避免 bash 中处理 VBScript 的转义问题
+        local B64_VBS="JyBvdjJuIFZQTiBDbGllbnQgTGF1bmNoZXIKT3B0aW9uIEV4cGxpY2l0CgpEaW0gb1NoZWxsLCBvRlNPLCBzQXBwRGlyLCBzTWFpbgpTZXQgb1NoZWxsID0gQ3JlYXRlT2JqZWN0KCJXU2NyaXB0LlNoZWxsIikKU2V0IG9GU08gICA9IENyZWF0ZU9iamVjdCgiU2NyaXB0aW5nLkZpbGVTeXN0ZW1PYmplY3QiKQoKc0FwcERpciA9IG9GU08uR2V0UGFyZW50Rm9sZGVyTmFtZShXU2NyaXB0LlNjcmlwdEZ1bGxOYW1lKQpzTWFpbiAgID0gc0FwcERpciAmICJcbWFpbi5weSIKCklmIE5vdCBvRlNPLkZpbGVFeGlzdHMoc01haW4pIFRoZW4KICAgIE1zZ0JveCAibWFpbi5weSBub3QgZm91bmQgaW46ICIgJiBzQXBwRGlyLCB2YkNyaXRpY2FsLCAib3YybiIKICAgIFdTY3JpcHQuUXVpdCAxCkVuZCBJZgoKb1NoZWxsLkN1cnJlbnREaXJlY3RvcnkgPSBzQXBwRGlyCgpEaW0gc0NtZApzQ21kID0gImNtZCAvYyBzdGFydCAvYiAiIiIiIHB5dGhvbncgIiIiICYgc01haW4gJiAiIiIiCm9TaGVsbC5SdW4gc0NtZCwgMCwgRmFsc2UK"
+        if command -v base64 &>/dev/null; then
+            echo "$B64_VBS" | base64 -d > "ov2n_launcher.vbs" 2>/dev/null
+            if [ -f "ov2n_launcher.vbs" ] && [ -s "ov2n_launcher.vbs" ]; then
+                echo -e "${GREEN}  ✓ ov2n_launcher.vbs generated (via base64)${NC}"
+            else
+                echo -e "${YELLOW}  ⚠ ov2n_launcher.vbs generation failed via base64${NC}"
+            fi
+        elif command -v python3 &>/dev/null; then
+            python3 -c "import base64,sys; sys.stdout.buffer.write(base64.b64decode('$B64_VBS'))" > "ov2n_launcher.vbs" 2>/dev/null
+            [ -f "ov2n_launcher.vbs" ] && [ -s "ov2n_launcher.vbs" ] && \
+                echo -e "${GREEN}  ✓ ov2n_launcher.vbs generated (via python3)${NC}" || \
+                echo -e "${YELLOW}  ⚠ ov2n_launcher.vbs generation failed${NC}"
+        elif command -v python &>/dev/null; then
+            python -c "import base64,sys; sys.stdout.buffer.write(base64.b64decode('$B64_VBS'))" > "ov2n_launcher.vbs" 2>/dev/null
+            [ -f "ov2n_launcher.vbs" ] && [ -s "ov2n_launcher.vbs" ] && \
+                echo -e "${GREEN}  ✓ ov2n_launcher.vbs generated (via python)${NC}" || \
+                echo -e "${YELLOW}  ⚠ ov2n_launcher.vbs generation failed${NC}"
+        else
+            echo -e "${YELLOW}  ⚠ Cannot generate ov2n_launcher.vbs (no base64 or python found)${NC}"
+        fi
+
+        # 确保项目根目录有 ov2n.bat（Inno Setup 也引用此文件）
+        if [ ! -f "ov2n.bat" ]; then
+            cp "${APP_DIR}/ov2n.bat" "ov2n.bat" 2>/dev/null || true
+            [ -f "ov2n.bat" ] && echo -e "${GREEN}  ✓ ov2n.bat copied to project root${NC}"
+        else
+            echo -e "${GREEN}  ✓ ov2n.bat already exists in project root${NC}"
+        fi
+        echo ""
+
+        # ── 尝试使用 Inno Setup 构建 setup.exe ────────────────
+        echo -e "${YELLOW}[10/10] Building Windows installer (setup.exe)...${NC}"
+
+        local SETUP_BUILT=false
+
+        # ────────────────────────────────────────────────────────
+        # 核心策略: 直接通过 cmd.exe /c 调用 build_installer.bat
+        # 原因: Git Bash 中路径转换问题导致直接调用 ISCC.exe 经常失败,
+        #       而 build_installer.bat 在 CMD 环境中有完善的 ISCC 检测逻辑,
+        #       用户已确认在 CMD 中可以正常工作。
+        # ────────────────────────────────────────────────────────
+        if [ -f "installer/build_installer.bat" ]; then
+            # 确保 version.txt 包含正确版本号（build_installer.bat 从中读取）
+            echo "${VERSION}" > "version.txt"
+
+            # 确保 dist 目录存在
+            mkdir -p "${DIST_DIR}"
+
+            # 获取 Windows 格式的项目根目录路径
+            local WIN_PROJECT_ROOT
+            WIN_PROJECT_ROOT=$(cygpath -w "$(pwd)" 2>/dev/null) || true
+            if [ -z "$WIN_PROJECT_ROOT" ]; then
+                # cygpath 不可用时，尝试从 pwd 转换
+                # /d/projects/xxx -> D:\projects\xxx
+                local UNIX_PWD
+                UNIX_PWD="$(pwd)"
+                if [[ "$UNIX_PWD" =~ ^/([a-zA-Z])/ ]]; then
+                    local DRIVE="${BASH_REMATCH[1]}"
+                    local REST="${UNIX_PWD:2}"
+                    WIN_PROJECT_ROOT="${DRIVE^^}:${REST//\//\\}"
+                else
+                    WIN_PROJECT_ROOT="$UNIX_PWD"
+                fi
+            fi
+
+            echo -e "${YELLOW}  Project root (Windows): ${WIN_PROJECT_ROOT}${NC}"
+            echo -e "${YELLOW}  Running: cmd.exe /c installer\\build_installer.bat --nopause${NC}"
+            echo ""
+
+            # 通过 cmd.exe /c 调用，--nopause 避免 pause 挂起
+            local CMD_OUTPUT=""
+            CMD_OUTPUT=$(cmd.exe /c "cd /d \"${WIN_PROJECT_ROOT}\" && installer\\build_installer.bat --nopause" 2>&1) || true
+            local CMD_EXIT=$?
+
+            # 显示 build_installer.bat 的输出
+            if [ -n "$CMD_OUTPUT" ]; then
+                echo "$CMD_OUTPUT" | tr -d '\r'
+            fi
+
+            # 检查 setup.exe 是否生成
+            local SETUP_FILE="${DIST_DIR}/${PKG_NAME}_${VERSION}_setup.exe"
+            if [ -f "$SETUP_FILE" ]; then
+                local SETUP_SIZE=$(du -h "${SETUP_FILE}" | cut -f1)
+                echo ""
+                echo -e "${GREEN}  ✓ Installer created: ${SETUP_FILE} (${SETUP_SIZE})${NC}"
+                SETUP_BUILT=true
+            else
+                echo ""
+                echo -e "${YELLOW}  ⚠ build_installer.bat finished (exit code: ${CMD_EXIT}) but setup.exe not found${NC}"
+                echo -e "${YELLOW}    Expected: ${SETUP_FILE}${NC}"
+
+                # 检查 dist/ 目录下是否有任何 setup.exe（可能文件名不同）
+                local FOUND_SETUP=""
+                FOUND_SETUP=$(find "${DIST_DIR}" -maxdepth 1 -name "*setup*.exe" -print -quit 2>/dev/null) || true
+                if [ -n "$FOUND_SETUP" ]; then
+                    echo -e "${GREEN}    Found: ${FOUND_SETUP}${NC}"
+                    SETUP_BUILT=true
+                fi
+            fi
+        else
+            echo -e "${YELLOW}  ⚠ installer/build_installer.bat not found${NC}"
+        fi
+
+        # 如果 build_installer.bat 方式失败，尝试直接查找并调用 ISCC
+        if [ "$SETUP_BUILT" = false ]; then
+            echo ""
+            echo -e "${YELLOW}  Trying direct ISCC.exe detection...${NC}"
+
+            local ISCC=""
+
+            # 搜索常见安装路径
+            local ISCC_SEARCH_PATHS=(
+                "/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+                "/d/Program Files (x86)/Inno Setup 6/ISCC.exe"
+                "/c/Program Files/Inno Setup 6/ISCC.exe"
+                "/d/Program Files/Inno Setup 6/ISCC.exe"
+                "/e/Program Files (x86)/Inno Setup 6/ISCC.exe"
+                "/e/Program Files/Inno Setup 6/ISCC.exe"
+            )
+
+            for iscc_path in "${ISCC_SEARCH_PATHS[@]}"; do
+                if [ -f "$iscc_path" ]; then
+                    ISCC="$iscc_path"
+                    echo -e "${GREEN}    Found ISCC at: ${ISCC}${NC}"
+                    break
+                fi
+            done
+
+            # 尝试 PATH
+            if [ -z "$ISCC" ] && command -v ISCC.exe &>/dev/null; then
+                ISCC="ISCC.exe"
+                echo -e "${GREEN}    Found ISCC in PATH${NC}"
+            fi
+
+            # 尝试注册表（使用 awk 代替 grep -oP，兼容 Git Bash）
+            if [ -z "$ISCC" ]; then
+                local REG_ISCC=""
+                for reg_key in \
+                    "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup 6_is1" \
+                    "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup 6_is1" \
+                    "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup 6_is1"; do
+                    REG_ISCC=$(reg.exe query "$reg_key" /v "InstallLocation" 2>/dev/null \
+                        | awk '/REG_SZ/ { sub(/.*REG_SZ[ \t]+/, ""); gsub(/\r/, ""); print }') || true
+                    [ -n "$REG_ISCC" ] && break
+                done
+
+                if [ -n "$REG_ISCC" ]; then
+                    # 去除末尾反斜杠和空格
+                    REG_ISCC="${REG_ISCC%\\}"
+                    REG_ISCC="${REG_ISCC%% }"
+                    echo -e "${GREEN}    Found Inno Setup via registry: ${REG_ISCC}${NC}"
+
+                    local REG_ISCC_UNIX=""
+                    REG_ISCC_UNIX=$(cygpath -u "${REG_ISCC}/ISCC.exe" 2>/dev/null) || true
+                    if [ -n "$REG_ISCC_UNIX" ] && [ -f "$REG_ISCC_UNIX" ]; then
+                        ISCC="$REG_ISCC_UNIX"
+                    fi
+                fi
+            fi
+
+            if [ -n "$ISCC" ]; then
+                local ISS_FILE="installer/ov2n_setup.iss"
+                if [ -f "$ISS_FILE" ]; then
+                    echo "    Building installer with ISCC..."
+                    if "$ISCC" /DMyAppVersion="${VERSION}" "$ISS_FILE" 2>&1; then
+                        local SETUP_FILE="${DIST_DIR}/${PKG_NAME}_${VERSION}_setup.exe"
+                        if [ -f "$SETUP_FILE" ]; then
+                            local SETUP_SIZE=$(du -h "${SETUP_FILE}" | cut -f1)
+                            echo -e "${GREEN}  ✓ Installer created: ${SETUP_FILE} (${SETUP_SIZE})${NC}"
+                            SETUP_BUILT=true
+                        fi
+                    else
+                        echo -e "${YELLOW}    Direct ISCC invocation failed${NC}"
+                    fi
+                fi
+            fi
+        fi
+
+        # 最终失败提示
+        if [ "$SETUP_BUILT" = false ]; then
+            echo ""
+            echo -e "${RED}╔══════════════════════════════════════════════════════════╗${NC}"
+            echo -e "${RED}║  ⚠ 无法自动生成 setup.exe                              ║${NC}"
+            echo -e "${RED}╚══════════════════════════════════════════════════════════╝${NC}"
+            echo ""
+            echo -e "${YELLOW}  请在 CMD (非 Git Bash) 中手动运行：${NC}"
+            echo ""
+            echo -e "${GREEN}    cd 到项目根目录${NC}"
+            echo -e "${GREEN}    installer\\build_installer.bat${NC}"
+            echo ""
+            echo -e "${YELLOW}  如果 Inno Setup 未安装：${NC}"
+            echo -e "${YELLOW}    下载安装 Inno Setup 6: ${BLUE}https://jrsoftware.org/isdl.php${NC}"
+            echo ""
+            echo -e "${YELLOW}  当前已生成便携版: ${GREEN}${ZIP_FILE}${NC}"
+            echo ""
+        fi
         echo ""
 
         # 列出打包内容摘要
@@ -549,12 +753,24 @@ UNINSTALL_ENTRY
         echo ""
 
         echo -e "${BLUE}═══════════════════════════════════════${NC}"
-        echo -e "${GREEN}Windows Installation Instructions:${NC}"
+        echo -e "${GREEN}Windows Build Output:${NC}"
         echo -e "${BLUE}═══════════════════════════════════════${NC}"
         echo ""
-        echo "  1. 将 ${ZIP_FILE} 复制到 Windows 机器"
+        if [ "$SETUP_BUILT" = true ]; then
+            echo -e "  ${GREEN}✓ 安装包: dist/${PKG_NAME}_${VERSION}_setup.exe${NC} (推荐)"
+            echo -e "  ${GREEN}✓ 便携版: ${ZIP_FILE}${NC}"
+            echo ""
+            echo -e "  安装方式 (推荐): 双击 ${PKG_NAME}_${VERSION}_setup.exe"
+        else
+            echo -e "  ${GREEN}✓ 便携版: ${ZIP_FILE}${NC}"
+            echo -e "  ${YELLOW}⚠ 安装包: 未生成 (需要 Inno Setup)${NC}"
+            echo ""
+            echo -e "  便携版使用方法:"
+        fi
+        echo ""
+        echo "  1. 将文件复制到 Windows 机器"
         echo "  2. 解压到任意目录 (如 C:\\ov2n)"
-        echo "  3. 右键以管理员身份运行 安装.bat"
+        echo "  3. 右键以管理员身份运行 install-ov2n.bat"
         echo "     - 自动安装 TAP-Windows 驱动"
         echo "     - 自动检测 NSSM / Xray / OpenVPN"
         echo "  4. 安装 Python 3.8+: https://www.python.org/"

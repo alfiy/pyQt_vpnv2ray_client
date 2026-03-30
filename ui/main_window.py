@@ -547,16 +547,12 @@ class MainWindow(QMainWindow):
         self._vpn_thread.success_signal.connect(self._on_vpn_started)
         self._vpn_thread.start()
 
-    def _on_vpn_started(self, ok):
-        """
-        Windows: success_signal 发送 bool(True)，服务模式用 1 作为占位 pid
-        Linux:   success_signal 发送 bool(True)，同样用 1（已统一为 bool）
-        """
-        self.vpn_pid = 1   # 服务模式统一用 1 表示运行中
+    def _on_vpn_started(self, pid: int):
+        self.vpn_pid = pid
         if IS_WINDOWS:
             self._set_vpn_status("✓ 服务运行中 (OV2NService)", "#4CAF50")
         else:
-            self._set_vpn_status("✓ 已连接", "#4CAF50")
+            self._set_vpn_status(f"✓ 已连接 (PID: {pid})", "#4CAF50")
         self._refresh_buttons()
 
     def _on_vpn_error(self, err: str):

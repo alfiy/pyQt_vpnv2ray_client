@@ -64,19 +64,10 @@ def _get_windows_handler():
 # ============================================================
 # 独立启动 OpenVPN 线程
 # ============================================================
-
 class SingleVPNThread(QThread):
-    """
-    独立启动 OpenVPN，不涉及 Xray。
-
-    Windows 流程：
-      register-openvpn-service.bat <config.ovpn> → net start OV2NService
-    success_signal 发送 True（服务模式无进程 PID）。
-    """
-
     update_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
-    success_signal = pyqtSignal(bool)   # Windows: True=启动成功; Linux: 兼容旧 int PID
+    success_signal = pyqtSignal(int)   # Windows: 1(占位); Linux: 真实 PID
 
     def __init__(self, vpn_config_path: str):
         super().__init__()
@@ -94,7 +85,7 @@ class SingleVPNThread(QThread):
             handler = _get_windows_handler()
             ok, msg = handler.start_openvpn(self.vpn_config_path)
             if ok:
-                self.success_signal.emit(True)
+                self.success_signal.emit(1)   # 服务模式无真实 PID，用 1 占位
             else:
                 self.error_signal.emit(f"OpenVPN 启动失败: {msg}")
         except Exception as e:
@@ -109,7 +100,7 @@ class SingleVPNThread(QThread):
             if result.returncode == 0:
                 pid = parse_pid_from_output(result.stdout, 'OpenVPN PID')
                 if pid:
-                    self.success_signal.emit(True)
+                    self.success_signal.emit(pid)   # 传真实 PID
                 else:
                     self.error_signal.emit(
                         "无法获取 OpenVPN PID\n\n日志: cat /tmp/openvpn.log")
@@ -124,7 +115,6 @@ class SingleVPNThread(QThread):
             self.error_signal.emit("OpenVPN 启动超时（60s）")
         except Exception as e:
             self.error_signal.emit(f"OpenVPN 启动异常: {e}")
-
 
 # ============================================================
 # 独立启动 Xray 线程

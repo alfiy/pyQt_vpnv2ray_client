@@ -96,7 +96,10 @@ python3 main.py
 ## 构建方法
 
 ```
-# 构建默认版本(1.0.0)
+# windows平台使用Inno进行构建，在构建前要使用安装Inno Setup 
+下载安装 Inno Setup 6: https://jrsoftware.org/isdl.php
+
+# 构建默认版本(windows 平台使用git bash)
 ./build.sh
 # 构建指定版本  
 ./build.sh --version 1.0.1  
@@ -122,6 +125,8 @@ python3 main.py
 ./build.sh rebuild --platform windows --debug
 ./build.sh clean
 
+# windows 平台使用cmd
+installer\build_installer.bat
 
 ```
 ## 工作原理

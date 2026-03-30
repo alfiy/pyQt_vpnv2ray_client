@@ -135,7 +135,9 @@ route delete $vpsAddr | Out-Null
 
 # 启动 xray（xray.exe 在 xrayDir 中）
 $xrayPath = Join-Path $xrayDir "xray.exe"
-Start-Process -FilePath $xrayPath -ArgumentList "-config `"$tempConfigPath`"" -WindowStyle Minimized
+# Minimized 启动 xray，避免 xray.exe 窗口弹出
+# Hidden 隐藏xray启动窗口
+Start-Process -FilePath $xrayPath -ArgumentList "-config `"$tempConfigPath`"" -WindowStyle Hidden
 Write-Host "xray 已启动，等待 xray-tun 创建..."
 
 # ★ 等待 xray-tun 出现，最多 20 秒

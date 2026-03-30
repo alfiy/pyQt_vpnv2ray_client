@@ -11,11 +11,14 @@ SS URL 配置管理器 (修复版)
 """
 import json
 import os
+import platform
 import re
 import base64
 import urllib.parse
 from typing import List, Dict, Optional, Tuple
 from PyQt5.QtWidgets import QMessageBox
+
+IS_WINDOWS = platform.system() == "Windows"
 
 
 class ShadowsocksServer:
@@ -243,8 +246,9 @@ class SSUrlParser:
 
 class V2RayConfigManager:
     """V2Ray 配置管理器"""
-    
-    DEFAULT_CONFIG = {
+
+    # Linux 默认配置：http + socks + tproxy inbound
+    DEFAULT_CONFIG_LINUX = {
         "log": {
             "loglevel": "warning"
         },
@@ -353,7 +357,119 @@ class V2RayConfigManager:
             ]
         }
     }
-    
+
+    # Windows 默认配置：TUN inbound（与 config.json.windows.template 一致）
+    DEFAULT_CONFIG_WINDOWS = {
+        "log": {
+            "loglevel": "warning"
+        },
+        "dns": {
+            "servers": [
+                {
+                    "address": "https://8.8.8.8/dns-query",
+                    "domains": ["geosite:geolocation-!cn"]
+                },
+                {
+                    "address": "223.5.5.5",
+                    "domains": ["geosite:cn", "geosite:private"],
+                    "expectIPs": ["geoip:cn"]
+                },
+                "localhost"
+            ]
+        },
+        "inbounds": [
+            {
+                "protocol": "tun",
+                "tag": "tun-in",
+                "settings": {
+                    "name": "xray-tun",
+                    "address": "10.0.0.1/24",
+                    "mtu": 1500,
+                    "stack": "system",
+                    "strictRoute": True
+                },
+                "sniffing": {
+                    "enabled": True,
+                    "destOverride": ["http", "tls", "quic"]
+                }
+            }
+        ],
+        "outbounds": [
+            {
+                "tag": "proxy",
+                "protocol": "shadowsocks",
+                "settings": {
+                    "servers": [
+                        {
+                            "address": "127.0.0.1",
+                            "port": 8388,
+                            "method": "aes-256-gcm",
+                            "password": "placeholder"
+                        }
+                    ]
+                }
+            },
+            {
+                "tag": "direct",
+                "protocol": "freedom",
+                "settings": {}
+            },
+            {
+                "tag": "block",
+                "protocol": "blackhole",
+                "settings": {}
+            }
+        ],
+        "routing": {
+            "domainStrategy": "IPIfNonMatch",
+            "rules": [
+                {
+                    "type": "field",
+                    "inboundTag": ["tun-in"],
+                    "port": 53,
+                    "network": "udp",
+                    "outboundTag": "proxy"
+                },
+                {
+                    "type": "field",
+                    "port": "137-139,445",
+                    "outboundTag": "block"
+                },
+                {
+                    "type": "field",
+                    "ip": ["geoip:private", "169.254.0.0/16"],
+                    "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "domain": ["geosite:cn"],
+                    "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "ip": ["geoip:cn"],
+                    "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "network": "tcp,udp",
+                    "outboundTag": "proxy"
+                }
+            ]
+        }
+    }
+
+    # 保留 DEFAULT_CONFIG 作为向后兼容别名（指向当前平台的默认配置）
+    DEFAULT_CONFIG = DEFAULT_CONFIG_WINDOWS if IS_WINDOWS else DEFAULT_CONFIG_LINUX
+
+    @staticmethod
+    def _get_platform_default() -> Dict:
+        """获取当前平台对应的默认配置（深拷贝）。"""
+        import copy
+        if IS_WINDOWS:
+            return copy.deepcopy(V2RayConfigManager.DEFAULT_CONFIG_WINDOWS)
+        return copy.deepcopy(V2RayConfigManager.DEFAULT_CONFIG_LINUX)
+
     def __init__(self, config_path: str):
         self.config_path = config_path
         self.config = self._load_config()
@@ -371,7 +487,7 @@ class V2RayConfigManager:
         加载策略：
           1. 先尝试标准 json.load（大多数情况）
           2. 失败时用 _strip_json_comments 去除注释后重试
-          3. 仍然失败才回退到 DEFAULT_CONFIG
+          3. 仍然失败才回退到平台对应的默认配置
         """
         if os.path.exists(self.config_path):
             try:
@@ -379,7 +495,7 @@ class V2RayConfigManager:
                     raw = f.read()
             except Exception as e:
                 print(f"读取配置文件失败: {e}")
-                return self.DEFAULT_CONFIG.copy()
+                return self._get_platform_default()
 
             # 尝试1: 标准 JSON 解析
             try:
@@ -393,9 +509,9 @@ class V2RayConfigManager:
                 return json.loads(stripped)
             except json.JSONDecodeError as e:
                 print(f"加载配置失败（含注释处理后仍无法解析），使用默认配置: {e}")
-                return self.DEFAULT_CONFIG.copy()
+                return self._get_platform_default()
 
-        return self.DEFAULT_CONFIG.copy()
+        return self._get_platform_default()
     
     def save_config(self) -> bool:
         """保存配置到文件。

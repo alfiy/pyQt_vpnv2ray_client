@@ -532,68 +532,70 @@ def create_geo_symlinks(geo_dir, filenames):
             except Exception as e:
                 log_debug(f"create_symlinks: 创建链接失败 {dst} - {e}")
 
-
 def start_openvpn(config_path):
-    """启动 OpenVPN"""
+    """
+    启动 OpenVPN，三层 PID 获取策略：
+    1. --writepid pidfile（最可靠）
+    2. pgrep 多 pattern 重试
+    3. /proc/*/cmdline 扫描（终极兜底）
+    """
     try:
         log_debug(f"start_openvpn: 配置文件 {config_path}")
 
-        result = subprocess.run(
-            ['which', 'openvpn'],
-            capture_output=True,
-            text=True
-        )
+        result = subprocess.run(['which', 'openvpn'], capture_output=True, text=True)
         if result.returncode != 0:
             print("错误: openvpn 未安装", file=sys.stderr)
             log_debug("start_openvpn: openvpn 未找到")
             return None
+        log_debug(f"start_openvpn: openvpn 路径 {result.stdout.strip()}")
 
-        openvpn_path = result.stdout.strip()
-        log_debug(f"start_openvpn: openvpn 路径 {openvpn_path}")
+        # 准备 pidfile
+        config_basename = os.path.splitext(os.path.basename(config_path))[0]
+        pid_file = f"/tmp/openvpn-{config_basename}.pid"
+        try:
+            os.unlink(pid_file)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log_debug(f"start_openvpn: 清理旧 pidfile 失败 (无害) - {e}")
+
+        cmd = ['openvpn', '--config', config_path, '--daemon', '--writepid', pid_file]
+        log_debug(f"start_openvpn: 启动命令 {' '.join(cmd)}")
 
         log_file = open("/tmp/openvpn.log", "w")
-        process = subprocess.Popen(
-            ['openvpn', '--config', config_path, '--daemon'],
-            stdout=log_file,
-            stderr=log_file
-        )
+        process = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
         log_file.close()
+        log_debug(f"start_openvpn: Popen 完成, 初始 PID={process.pid} (daemon 后无效)")
 
-        log_debug(f"start_openvpn: Popen 完成, 初始 PID={process.pid}")
-
-        for i in range(10):
-            time.sleep(0.5)
-            poll = process.poll()
-            if poll is not None:
-                log_debug(f"start_openvpn: 初始进程已退出 (daemon fork), poll={poll}")
-                break
-
-        search_pattern = f'openvpn.*{os.path.basename(config_path)}'
-        log_debug(f"start_openvpn: 查找守护进程 pattern={search_pattern}")
-
-        result = subprocess.run(
-            ['pgrep', '-f', search_pattern],
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode == 0 and result.stdout.strip():
-            pid = int(result.stdout.strip().split('\n')[0])
+        # 策略 1: 等待 pidfile
+        pid = _wait_for_pidfile(pid_file, timeout=8.0, interval=0.3)
+        if pid and is_process_alive(pid):
             print(f"OpenVPN PID: {pid}")
-            log_debug(f"start_openvpn: ✓ 成功,PID={pid}")
+            log_debug(f"start_openvpn: ✓ 策略1(pidfile) 成功, PID={pid}")
             return pid
-        else:
-            print("错误: OpenVPN 启动失败", file=sys.stderr)
-            log_debug(f"start_openvpn: ✗ pgrep 失败,rc={result.returncode}")
-            try:
-                with open("/tmp/openvpn.log", "r") as f:
-                    log_content = f.read(500)
-                if log_content:
-                    log_debug(f"start_openvpn: openvpn 日志={log_content}")
-                    print(f"OpenVPN 日志: {log_content}", file=sys.stderr)
-            except Exception:
-                pass
-            return None
+        if pid:
+            log_debug(f"start_openvpn: pidfile 有 PID={pid} 但进程不存在, 继续")
+
+        # 策略 2: pgrep 多 pattern 重试
+        log_debug("start_openvpn: 策略2 - pgrep 多 pattern 重试")
+        pid = _find_openvpn_pid_pgrep(config_path, retries=8, interval=0.5)
+        if pid:
+            print(f"OpenVPN PID: {pid}")
+            log_debug(f"start_openvpn: ✓ 策略2(pgrep) 成功, PID={pid}")
+            return pid
+
+        # 策略 3: /proc 扫描
+        log_debug("start_openvpn: 策略3 - /proc/*/cmdline 扫描")
+        pid = _find_openvpn_pid_proc(config_path)
+        if pid:
+            print(f"OpenVPN PID: {pid}")
+            log_debug(f"start_openvpn: ✓ 策略3(/proc) 成功, PID={pid}")
+            return pid
+
+        print("错误: OpenVPN 启动失败", file=sys.stderr)
+        log_debug("start_openvpn: ✗ 三种策略均失败")
+        _dump_openvpn_log()
+        return None
 
     except Exception as e:
         print(f"启动 OpenVPN 失败: {e}", file=sys.stderr)
@@ -601,6 +603,91 @@ def start_openvpn(config_path):
         import traceback
         log_debug(f"start_openvpn: 堆栈 - {traceback.format_exc()}")
         return None
+
+
+def _wait_for_pidfile(pid_file, timeout=8.0, interval=0.3):
+    """轮询等待 pidfile 出现并读取有效 PID。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with open(pid_file, 'r') as f:
+                content = f.read().strip()
+            if content.isdigit():
+                pid = int(content)
+                if pid > 1:
+                    log_debug(f"_wait_for_pidfile: 读到 PID={pid}")
+                    return pid
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log_debug(f"_wait_for_pidfile: 读取异常 - {e}")
+        time.sleep(interval)
+    log_debug(f"_wait_for_pidfile: 超时 {timeout}s 未读到有效 PID")
+    return None
+
+
+def _find_openvpn_pid_pgrep(config_path, retries=8, interval=0.5):
+    """用多个 pgrep pattern 依次尝试，返回 int PID 或 None。"""
+    config_basename = os.path.basename(config_path)
+    config_name_noext = os.path.splitext(config_basename)[0]
+    patterns = [
+        f'openvpn.*{config_path}',
+        f'openvpn.*{config_basename}',
+        f'openvpn.*{config_name_noext}',
+        'openvpn',
+    ]
+    for attempt in range(retries):
+        for pattern in patterns:
+            try:
+                result = subprocess.run(
+                    ['pgrep', '-f', '-n', pattern],
+                    capture_output=True, text=True)
+                if result.returncode == 0 and result.stdout.strip():
+                    pid_str = result.stdout.strip().split('\n')[0]
+                    if pid_str.isdigit():
+                        pid = int(pid_str)
+                        if is_process_alive(pid):
+                            log_debug(f"_find_openvpn_pid_pgrep: pattern={pattern!r} PID={pid} (尝试#{attempt+1})")
+                            return pid
+            except Exception as e:
+                log_debug(f"_find_openvpn_pid_pgrep: pgrep 异常 - {e}")
+        log_debug(f"_find_openvpn_pid_pgrep: 第{attempt+1}次未找到, 等待 {interval}s")
+        time.sleep(interval)
+    return None
+
+
+def _find_openvpn_pid_proc(config_path):
+    """遍历 /proc/*/cmdline 查找 openvpn 进程，返回 int PID 或 None。"""
+    config_basename = os.path.basename(config_path)
+    try:
+        for entry in os.listdir('/proc'):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f'/proc/{entry}/cmdline', 'rb') as f:
+                    cmdline = f.read().replace(b'\x00', b' ').decode('utf-8', errors='replace')
+                if 'openvpn' in cmdline and config_basename in cmdline:
+                    pid = int(entry)
+                    if is_process_alive(pid):
+                        log_debug(f"_find_openvpn_pid_proc: PID={pid}, cmdline={cmdline[:120]!r}")
+                        return pid
+            except (FileNotFoundError, PermissionError, ValueError):
+                continue
+    except Exception as e:
+        log_debug(f"_find_openvpn_pid_proc: 扫描异常 - {e}")
+    return None
+
+
+def _dump_openvpn_log(max_bytes=1000):
+    """打印 openvpn 日志，辅助排查启动失败原因。"""
+    try:
+        with open("/tmp/openvpn.log", "r") as f:
+            content = f.read(max_bytes)
+        if content:
+            log_debug(f"openvpn log:\n{content}")
+            print(f"OpenVPN 日志:\n{content}", file=sys.stderr)
+    except Exception:
+        pass
 
 
 def start_v2ray(config_path):
