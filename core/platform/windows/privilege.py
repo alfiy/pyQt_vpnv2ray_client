@@ -1,29 +1,44 @@
 """
 Windows 权限提升实现。
 
-控制流设计：
+控制流设计（v2，无脚本版）：
   OpenVPN:
-    注册服务 → register-openvpn-service.bat <config.ovpn>
-    启动     → net start OV2NService
-    停止     → net stop OV2NService
+    启动 → OpenVPNManager.start(config.ovpn)   [subprocess.Popen 直接管理进程]
+    停止 → OpenVPNManager.stop()
 
   Xray (TUN 模式，需要管理员权限):
-    启动 → powershell -File scripts/windows/start-xray.ps1
-    停止 → powershell -File scripts/windows/stop-xray.ps1
+    启动 → XrayManager.start(config.json)      [subprocess.Popen 直接管理进程]
+    停止 → XrayManager.stop()                  [同时清理路由/DNS]
 
-说明：
-  - OpenVPN 通过 NSSM 注册为 Windows Service，由 SCM 管理生命周期
-  - Xray 通过 PowerShell 脚本启动，脚本内部负责路由、DNS、TUN 适配器配置
-  - privilege.py 不重复实现路由/DNS/sendThrough 注入，全部由 ps1 脚本负责
-  - 所有 subprocess 调用均使用 CREATE_NO_WINDOW 避免弹出控制台窗口
+变更说明（对比 v1）：
+  - 完全移除对 start-xray.ps1 / stop-xray.ps1 的调用
+  - 完全移除对 register-openvpn-service.bat 的调用
+  - 完全移除对 NSSM 服务注册 / net start / net stop 的依赖
+  - 路由、DNS、sendThrough 注入全部由 vpn_process.XrayManager 内部处理
+  - OpenVPN 进程生命周期由 vpn_process.OpenVPNManager 直接管理
+
+杀软友好原因：
+  - 不调用任何 .ps1 脚本（-ExecutionPolicy Bypass 消失）
+  - 不写注册表服务项（NSSM install 行为消失）
+  - 不使用 DETACHED_PROCESS flag（隐藏进程特征消失）
+  - 只做 subprocess.Popen(openvpn.exe / xray.exe)，白名单行为
 """
 import os
-import subprocess
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 from core.platform.base import PrivilegeHandler
 
-CREATE_NO_WINDOW = 0x08000000
+# vpn_process.py 与本文件同属项目根目录
+# 如果你的 privilege.py 位于 core/platform/windows/，需要调整相对导入路径
+try:
+    from vpn_process import OpenVPNManager, XrayManager, create_managers
+except ImportError:
+    # 回退：尝试从项目根目录导入
+    import sys
+    import pathlib
+    _root = pathlib.Path(__file__).resolve().parent.parent.parent.parent
+    sys.path.insert(0, str(_root))
+    from vpn_process import OpenVPNManager, XrayManager, create_managers
 
 
 class WindowsPrivilegeHandler(PrivilegeHandler):
@@ -31,6 +46,20 @@ class WindowsPrivilegeHandler(PrivilegeHandler):
     def __init__(self):
         from core.platform.windows.paths import WindowsPaths
         self._paths = WindowsPaths()
+
+        # 创建进程管理器（懒初始化，首次调用时构建）
+        self._openvpn_mgr: Optional[OpenVPNManager] = None
+        self._xray_mgr: Optional[XrayManager] = None
+
+    # ── 进程管理器懒初始化 ──────────────────────────────────
+    def _get_managers(self) -> Tuple[OpenVPNManager, XrayManager]:
+        """首次调用时构建管理器，之后复用同一实例（保留进程句柄）。"""
+        if self._openvpn_mgr is None or self._xray_mgr is None:
+            import pathlib
+            self._openvpn_mgr, self._xray_mgr = create_managers(
+                app_root=pathlib.Path(self._paths.app_root)
+            )
+        return self._openvpn_mgr, self._xray_mgr
 
     # ══════════════════════════════════════════
     # PrivilegeHandler 基类接口
@@ -40,11 +69,19 @@ class WindowsPrivilegeHandler(PrivilegeHandler):
         return True
 
     def check_helper_installed(self) -> bool:
-        """检查 NSSM 是否存在。"""
-        return os.path.isfile(self._paths.nssm_exe)
+        """
+        v1 检查 NSSM 是否存在。
+        v2 改为检查 openvpn.exe 是否存在（服务注册已不再需要 NSSM）。
+        """
+        return os.path.isfile(self._paths.openvpn_exe)
 
     def run_privileged(self, cmd: list, timeout: int = 60) -> Tuple[int, str, str]:
-        """以管理员权限执行命令（UAC）。"""
+        """
+        以管理员权限执行命令（UAC 提升）。
+        仅用于需要提权的零散系统命令，不用于 OpenVPN/Xray 启停。
+        """
+        import subprocess
+        _CREATE_NO_WINDOW = 0x08000000
         try:
             ps_cmd = (
                 f'Start-Process -FilePath "{cmd[0]}" '
@@ -52,9 +89,9 @@ class WindowsPrivilegeHandler(PrivilegeHandler):
                 f'-Verb RunAs -Wait -PassThru'
             )
             result = subprocess.run(
-                ["powershell", "-Command", ps_cmd],
+                ["powershell", "-NonInteractive", "-Command", ps_cmd],
                 capture_output=True, text=True, timeout=timeout,
-                creationflags=CREATE_NO_WINDOW,
+                creationflags=_CREATE_NO_WINDOW,
             )
             return result.returncode, result.stdout, result.stderr
         except subprocess.TimeoutExpired:
@@ -63,175 +100,79 @@ class WindowsPrivilegeHandler(PrivilegeHandler):
             return -1, "", str(e)
 
     # ══════════════════════════════════════════
-    # OpenVPN 服务管理
+    # OpenVPN 管理（直接进程，不经过 NSSM）
     # ══════════════════════════════════════════
-
-    def register_openvpn_service(self, vpn_config_path: str) -> Tuple[bool, str]:
-        """
-        调用 register-openvpn-service.bat 注册 OV2NService。
-        bat 内部会先 remove 旧服务再重新注册，每次启动前调用。
-
-        Args:
-            vpn_config_path: .ovpn 配置文件的绝对路径
-
-        Returns:
-            (success, message)
-        """
-        bat = os.path.join(
-            self._paths.scripts_dir, "windows", "register-openvpn-service.bat")
-        if not os.path.isfile(bat):
-            return False, f"注册脚本未找到: {bat}"
-        if not vpn_config_path or not os.path.isfile(vpn_config_path):
-            return False, f"VPN 配置文件不存在: {vpn_config_path}"
-
-        try:
-            # 直接调用 bat（已移除 pause，不会阻塞）。
-            # 不使用 CREATE_NO_WINDOW，确保 NSSM install 能正确执行。
-            # encoding='utf-8' + errors='replace' 防止 GBK 输出崩溃。
-            result = subprocess.run(
-                [bat, vpn_config_path],
-                capture_output=True, text=True,
-                encoding='utf-8', errors='replace',
-                timeout=60,
-            )
-            if result.returncode == 0:
-                return True, "OV2NService 注册成功"
-            detail = result.stdout.strip() or result.stderr.strip()
-            return False, f"服务注册失败 (exit {result.returncode}): {detail}"
-        except subprocess.TimeoutExpired:
-            return False, "服务注册超时（60s）"
-        except Exception as e:
-            return False, f"服务注册异常: {e}"
 
     def start_openvpn(self, vpn_config_path: str) -> Tuple[bool, str]:
         """
-        注册并启动 OpenVPN 服务。
-        流程：register-openvpn-service.bat → net start OV2NService
+        直接用 OpenVPNManager 启动 openvpn.exe，不注册系统服务。
 
         Args:
-            vpn_config_path: .ovpn 配置文件绝对路径
-
-        Returns:
-            (success, message)
+            vpn_config_path: .ovpn 配置文件的绝对路径
         """
-        ok, msg = self.register_openvpn_service(vpn_config_path)
-        if not ok:
-            return False, msg
-        return self._net_start("OV2NService")
+        if not vpn_config_path or not os.path.isfile(vpn_config_path):
+            return False, f"VPN 配置文件不存在: {vpn_config_path}"
+
+        import pathlib
+        openvpn_mgr, _ = self._get_managers()
+        ok = openvpn_mgr.start(pathlib.Path(vpn_config_path))
+        if ok:
+            return True, "OpenVPN 已启动"
+        return False, "OpenVPN 启动失败，请检查 logs/openvpn.log"
 
     def stop_openvpn(self) -> Tuple[bool, str]:
-        """
-        停止 OpenVPN 服务（net stop OV2NService）。
-
-        Returns:
-            (success, message)
-        """
-        return self._net_stop("OV2NService")
+        """停止 OpenVPN 进程。"""
+        openvpn_mgr, _ = self._get_managers()
+        openvpn_mgr.stop()
+        return True, "OpenVPN 已停止"
 
     def is_openvpn_running(self) -> bool:
-        """查询 OV2NService 是否处于 RUNNING 状态。"""
-        return self._is_service_running("OV2NService")
+        """检查 OpenVPN 进程是否在运行。"""
+        openvpn_mgr, _ = self._get_managers()
+        return openvpn_mgr.is_running
 
     # ══════════════════════════════════════════
-    # Xray 管理（通过 PowerShell 脚本）
+    # Xray 管理（直接进程，含路由/DNS 管理）
     # ══════════════════════════════════════════
 
     def start_xray(self, v2ray_config_path: str = "") -> Tuple[bool, str]:
         """
-        调用 start-xray.ps1 启动 Xray TUN 模式。
-        脚本内部负责：sendThrough 注入、路由设置、DNS 配置、TUN 适配器。
-        需要管理员权限（脚本自身会检查）。
+        用 XrayManager 直接启动 xray.exe。
+        XrayManager 内部完整处理：
+          - sendThrough 注入
+          - config.runtime.json 写入（无 BOM UTF-8）
+          - 等待 xray-tun 网卡出现
+          - route add / netsh 路由和 DNS 配置
 
         Args:
-            v2ray_config_path: 用户导入的 config.json 路径，
-                               不传则 ps1 自动按优先级查找。
-
-        Returns:
-            (success, message)
+            v2ray_config_path: 用户导入的 config.json 路径（可为空，会自动查找）
         """
-        ps1 = os.path.join(
-            self._paths.scripts_dir, "windows", "start-xray.ps1")
-        if not os.path.isfile(ps1):
-            return False, f"Xray 启动脚本未找到: {ps1}"
+        import pathlib
+        _, xray_mgr = self._get_managers()
 
-        try:
-            # 构建命令：有用户配置路径时通过 -ConfigPath 传入 ps1
-            cmd = [
-                "powershell",
-                "-NonInteractive",
-                "-ExecutionPolicy", "Bypass",
-                "-File", ps1,
-            ]
-            if v2ray_config_path and os.path.isfile(v2ray_config_path):
-                cmd += ["-ConfigPath", v2ray_config_path]
-            result = subprocess.run(
-                cmd,
-                capture_output=True, text=True,
-                encoding='utf-8', errors='replace',
-                timeout=120,
-                creationflags=CREATE_NO_WINDOW,
-            )
-            output = result.stdout.strip()
-            stderr = result.stderr.strip()
-            # 用 returncode 和 ASCII 标记判断成功，避免中文乱码导致误判。
-            # ps1 成功时：returncode=0 且输出包含 "=====" (ASCII, 不受编码影响)
-            # ps1 失败时：returncode!=0 或输出包含 "error:" (ASCII)
-            # 判断成功：returncode=0 即为成功。
-            # ps1 里 route add 的"路由已存在"警告不影响功能，不计为错误。
-            # 不用检查中文输出（会乱码），也不用检查 =====（有时会缺失）。
-            if result.returncode == 0:
-                return True, "Xray 已启动"
-            # 失败时收集 error: 行（ASCII 前缀，不受乱码影响）
-            error_lines = [l for l in output.splitlines() if l.startswith("error:")]
-            if error_lines:
-                detail = "\n".join(error_lines)
-            elif stderr:
-                detail = stderr
-            elif output:
-                last_lines = [l for l in output.splitlines() if l.strip()][-3:]
-                detail = "\n".join(last_lines)
-            else:
-                detail = f"exit code: {result.returncode}"
-            return False, f"Xray 启动失败: {detail}"
-        except subprocess.TimeoutExpired:
-            return False, "Xray 启动超时（120s），请检查 config.json 及网络"
-        except Exception as e:
-            return False, f"Xray 启动异常: {e}"
+        # 按优先级确定配置文件路径
+        config_path = self._resolve_xray_config(v2ray_config_path)
+        if config_path is None:
+            return False, "未找到 Xray 配置文件（已检查 -ConfigPath、APPDATA、resources/xray）"
+
+        ok = xray_mgr.start(config_path)
+        if ok:
+            return True, "Xray 已启动"
+        return False, "Xray 启动失败，请检查 logs/xray.log"
 
     def stop_xray(self) -> Tuple[bool, str]:
         """
-        调用 stop-xray.ps1 停止 Xray，清理路由和 DNS。
-
-        Returns:
-            (success, message)
+        停止 Xray，同时清理路由和恢复 DNS。
+        完整替代 stop-xray.ps1 的所有功能。
         """
-        ps1 = os.path.join(
-            self._paths.scripts_dir, "windows", "stop-xray.ps1")
-        if not os.path.isfile(ps1):
-            return self._taskkill_xray()
-
-        try:
-            result = subprocess.run(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps1],
-                capture_output=True, text=True,
-                encoding='utf-8', errors='replace',
-                timeout=60,
-                creationflags=CREATE_NO_WINDOW,
-            )
-            if result.returncode == 0:
-                return True, "Xray 已停止"
-            detail = result.stdout.strip() or result.stderr.strip()
-            return False, f"Xray 停止失败: {detail}"
-        except subprocess.TimeoutExpired:
-            return self._taskkill_xray()
-        except Exception as e:
-            return False, f"Xray 停止异常: {e}"
+        _, xray_mgr = self._get_managers()
+        xray_mgr.stop()
+        return True, "Xray 已停止"
 
     def is_xray_running(self) -> bool:
-        """检查 xray.exe 进程是否存在。"""
-        from core.platform.windows.process_manager import WindowsProcessManager
-        pm = WindowsProcessManager()
-        return pm.find_process_by_name("xray.exe") is not None
+        """检查 xray.exe 进程是否在运行。"""
+        _, xray_mgr = self._get_managers()
+        return xray_mgr.is_running
 
     # ══════════════════════════════════════════
     # 联合启停（供 CombinedStartThread 调用）
@@ -244,7 +185,7 @@ class WindowsPrivilegeHandler(PrivilegeHandler):
 
         Args:
             vpn_config_path:   .ovpn 路径，空或不存在则跳过 OpenVPN
-            v2ray_config_path: 不为空则尝试启动 Xray（实际配置由 ps1 读取）
+            v2ray_config_path: config.json 路径，空则自动查找
 
         Returns:
             (success, message, info_dict)
@@ -261,10 +202,10 @@ class WindowsPrivilegeHandler(PrivilegeHandler):
             else:
                 errors.append(f"OpenVPN: {msg}")
 
-        # Xray（可选）：把用户配置路径传给 start_xray，ps1 会优先使用
-        xray_config = os.path.join(
+        # Xray（可选）
+        xray_config_fallback = os.path.join(
             self._paths.app_root, "resources", "xray", "config.json")
-        if v2ray_config_path or os.path.isfile(xray_config):
+        if v2ray_config_path or os.path.isfile(xray_config_fallback):
             ok, msg = self.start_xray(v2ray_config_path)
             if ok:
                 info["xray_started"] = True
@@ -295,7 +236,7 @@ class WindowsPrivilegeHandler(PrivilegeHandler):
         """
         errors = []
         stop_openvpn = info.get("openvpn_started", True) if info else True
-        stop_xray = info.get("xray_started", True) if info else True
+        stop_xray    = info.get("xray_started",    True) if info else True
 
         if stop_openvpn and self.is_openvpn_running():
             ok, msg = self.stop_openvpn()
@@ -312,125 +253,89 @@ class WindowsPrivilegeHandler(PrivilegeHandler):
         return True, "所有服务已停止"
 
     # ══════════════════════════════════════════
-    # NSSM 服务管理（供安装脚本调用）
+    # 服务管理（向后兼容保留接口，内部已不依赖 NSSM）
     # ══════════════════════════════════════════
 
     def install_service(self) -> Tuple[bool, str]:
-        """注册服务框架（无 config），供 install.bat 调用。"""
-        nssm = self._paths.nssm_exe
-        if not os.path.isfile(nssm):
-            return False, f"NSSM 未找到: {nssm}"
-        openvpn_exe = self._paths.openvpn_exe
-        if not os.path.isfile(openvpn_exe):
-            return False, f"OpenVPN 未找到: {openvpn_exe}"
-        service_name = "OV2NService"
-        try:
-            subprocess.run([nssm, "remove", service_name, "confirm"],
-                           capture_output=True, creationflags=CREATE_NO_WINDOW)
-            result = subprocess.run([nssm, "install", service_name, openvpn_exe],
-                                    capture_output=True, text=True,
-                                    creationflags=CREATE_NO_WINDOW)
-            if result.returncode != 0:
-                return False, f"NSSM install 失败: {result.stderr}"
-            subprocess.run([nssm, "set", service_name, "Start", "SERVICE_DEMAND_START"],
-                           capture_output=True, creationflags=CREATE_NO_WINDOW)
-            return True, f"服务 {service_name} 已注册"
-        except Exception as e:
-            return False, f"注册失败: {e}"
+        """
+        v2：无需安装系统服务，OpenVPN 进程由 GUI 直接管理。
+        保留此接口以免调用方报错，直接返回成功。
+        """
+        return True, "v2 不使用系统服务，OpenVPN 由 GUI 进程直接管理"
 
     def uninstall_service(self) -> Tuple[bool, str]:
-        """卸载 OV2NService。"""
-        nssm = self._paths.nssm_exe
+        """
+        v2：清理可能残留的旧版 OV2NService（如果存在）。
+        """
+        import subprocess
+        _CREATE_NO_WINDOW = 0x08000000
         service_name = "OV2NService"
         try:
-            subprocess.run(["net", "stop", service_name],
-                           capture_output=True, creationflags=CREATE_NO_WINDOW)
-            if os.path.isfile(nssm):
-                subprocess.run([nssm, "remove", service_name, "confirm"],
-                               capture_output=True, creationflags=CREATE_NO_WINDOW)
+            # 先尝试停止
+            subprocess.run(
+                ["net", "stop", service_name],
+                capture_output=True, creationflags=_CREATE_NO_WINDOW,
+                timeout=15,
+            )
+            # 再删除
+            nssm = getattr(self._paths, "nssm_exe", "")
+            if nssm and os.path.isfile(nssm):
+                subprocess.run(
+                    [nssm, "remove", service_name, "confirm"],
+                    capture_output=True, creationflags=_CREATE_NO_WINDOW,
+                    timeout=15,
+                )
             else:
-                subprocess.run(["sc", "delete", service_name],
-                               capture_output=True, creationflags=CREATE_NO_WINDOW)
-            return True, f"服务 {service_name} 已卸载"
+                subprocess.run(
+                    ["sc", "delete", service_name],
+                    capture_output=True, creationflags=_CREATE_NO_WINDOW,
+                    timeout=15,
+                )
+            return True, f"旧版服务 {service_name} 已清理"
         except Exception as e:
-            return False, f"卸载失败: {e}"
+            return True, f"服务清理（忽略错误）: {e}"
+
+    def register_openvpn_service(self, vpn_config_path: str) -> Tuple[bool, str]:
+        """
+        v2：不再使用 register-openvpn-service.bat。
+        保留接口，直接委托给 start_openvpn()。
+        """
+        return self.start_openvpn(vpn_config_path)
 
     def set_service_autostart(self, enabled: bool) -> Tuple[bool, str]:
-        """设置 OV2NService 是否开机自启。"""
-        nssm = self._paths.nssm_exe
-        service_name = "OV2NService"
-        start_type = "SERVICE_AUTO_START" if enabled else "SERVICE_DEMAND_START"
-        try:
-            if os.path.isfile(nssm):
-                subprocess.run([nssm, "set", service_name, "Start", start_type],
-                               capture_output=True, creationflags=CREATE_NO_WINDOW)
-            else:
-                subprocess.run(["sc", "config", service_name,
-                                "start=", "auto" if enabled else "demand"],
-                               capture_output=True, creationflags=CREATE_NO_WINDOW)
-            return True, f"服务已设为{'开机自启' if enabled else '手动启动'}"
-        except Exception as e:
-            return False, f"设置失败: {e}"
+        """
+        v2：不依赖系统服务，无开机自启概念。
+        如需实现开机自启，应通过任务计划程序（schtasks）而非服务。
+        """
+        return False, "v2 不使用系统服务，开机自启功能待实现（建议通过任务计划程序）"
 
     # ══════════════════════════════════════════
-    # 内部工具方法
+    # 内部工具
     # ══════════════════════════════════════════
 
-    def _net_start(self, service_name: str) -> Tuple[bool, str]:
-        try:
-            result = subprocess.run(
-                ["net", "start", service_name],
-                capture_output=True, text=True, timeout=30,
-                encoding='utf-8', errors='replace',
-                creationflags=CREATE_NO_WINDOW)
-            if result.returncode == 0:
-                return True, f"{service_name} 已启动"
-            if "已经启动" in result.stdout or "already been started" in result.stdout:
-                return True, f"{service_name} 已在运行"
-            detail = result.stdout.strip() or result.stderr.strip()
-            return False, f"{service_name} 启动失败: {detail}"
-        except subprocess.TimeoutExpired:
-            return False, f"{service_name} 启动超时"
-        except Exception as e:
-            return False, f"{service_name} 启动异常: {e}"
+    def _resolve_xray_config(self, user_config_path: str) -> "Optional[pathlib.Path]":
+        """
+        按优先级查找 Xray 配置文件，等价于 start-xray.ps1 的配置查找逻辑：
+          1. 调用方传入的 user_config_path（用户从 GUI 导入的配置）
+          2. %APPDATA%\ov2n\config.json（持久化的用户配置）
+          3. resources/xray/config.json（内置配置）
+        """
+        import pathlib
 
-    def _net_stop(self, service_name: str) -> Tuple[bool, str]:
-        try:
-            result = subprocess.run(
-                ["net", "stop", service_name],
-                capture_output=True, text=True, timeout=30,
-                encoding='utf-8', errors='replace',
-                creationflags=CREATE_NO_WINDOW)
-            if result.returncode == 0:
-                return True, f"{service_name} 已停止"
-            if "未启动" in result.stdout or "not started" in result.stdout:
-                return True, f"{service_name} 本未运行"
-            detail = result.stdout.strip() or result.stderr.strip()
-            return False, f"{service_name} 停止失败: {detail}"
-        except subprocess.TimeoutExpired:
-            return False, f"{service_name} 停止超时"
-        except Exception as e:
-            return False, f"{service_name} 停止异常: {e}"
+        # 1. 用户传入
+        if user_config_path and os.path.isfile(user_config_path):
+            return pathlib.Path(user_config_path)
 
-    def _is_service_running(self, service_name: str) -> bool:
-        try:
-            result = subprocess.run(
-                ["sc", "query", service_name],
-                capture_output=True, text=True,
-                creationflags=CREATE_NO_WINDOW)
-            return "RUNNING" in result.stdout
-        except Exception:
-            return False
+        # 2. APPDATA
+        appdata = os.environ.get("APPDATA", "")
+        if appdata:
+            appdata_cfg = pathlib.Path(appdata) / "ov2n" / "config.json"
+            if appdata_cfg.exists():
+                return appdata_cfg
 
-    def _taskkill_xray(self) -> Tuple[bool, str]:
-        """降级：直接 taskkill xray.exe（不清理路由/DNS）。"""
-        try:
-            result = subprocess.run(
-                ["taskkill", "/F", "/IM", "xray.exe"],
-                capture_output=True, text=True,
-                creationflags=CREATE_NO_WINDOW)
-            if result.returncode == 0:
-                return True, "xray 进程已强制终止（路由/DNS 未清理）"
-            return False, f"taskkill 失败: {result.stderr.strip()}"
-        except Exception as e:
-            return False, f"taskkill 异常: {e}"
+        # 3. 内置
+        builtin = pathlib.Path(self._paths.app_root) / "resources" / "xray" / "config.json"
+        if builtin.exists():
+            return builtin
+
+        return None

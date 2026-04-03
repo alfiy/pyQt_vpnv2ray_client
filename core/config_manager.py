@@ -87,7 +87,7 @@ def save_imported_flags(vpn_imported: bool, v2ray_imported: bool) -> None:
         with open(IMPORTED_FLAGS_FILE, 'w', encoding='utf-8') as f:
             json.dump({'vpn': vpn_imported, 'v2ray': v2ray_imported}, f)
     except Exception as e:
-        print(f"保存导入标志失败: {e}")
+        print(f"[ov2n] ERR save imported flags: {e}")
 
 
 # ============================================
@@ -118,9 +118,9 @@ def import_vpn_config(source_path: str) -> str:
     dst_real = os.path.realpath(USER_VPN_CONFIG)
     if src_real != dst_real:
         shutil.copy2(source_path, USER_VPN_CONFIG)
-        print(f"✓ VPN 配置已复制到: {USER_VPN_CONFIG}")
+        print(f"[ov2n] OK VPN config copied to: {USER_VPN_CONFIG}")
     else:
-        print(f"✓ VPN 配置已在用户目录中: {USER_VPN_CONFIG}")
+        print(f"[ov2n] OK VPN config already in place: {USER_VPN_CONFIG}")
 
     return USER_VPN_CONFIG
 
@@ -149,9 +149,9 @@ def import_v2ray_config(source_path: str) -> str:
     dst_real = os.path.realpath(USER_V2RAY_CONFIG)
     if src_real != dst_real:
         shutil.copy2(source_path, USER_V2RAY_CONFIG)
-        print(f"✓ V2Ray 配置已复制到: {USER_V2RAY_CONFIG}")
+        print(f"[ov2n] OK V2Ray config copied to: {USER_V2RAY_CONFIG}")
     else:
-        print(f"✓ V2Ray 配置已在用户目录中: {USER_V2RAY_CONFIG}")
+        print(f"[ov2n] OK V2Ray config already in place: {USER_V2RAY_CONFIG}")
 
     return USER_V2RAY_CONFIG
 
@@ -181,7 +181,7 @@ def load_tproxy_config() -> Dict:
         defaults["mark"]    = int(data.get("MARK", 1))
         defaults["table"]   = int(data.get("TABLE", 100))
     except Exception as e:
-        print(f"加载 tproxy 配置失败: {e}")
+        print(f"[ov2n] ERR load tproxy config: {e}")
     return defaults
 
 
@@ -191,14 +191,14 @@ def save_tproxy_config(enabled: bool, vps_ip: str, port: int,
     try:
         os.makedirs(os.path.dirname(TPROXY_CONF_PATH), exist_ok=True)
         with open(TPROXY_CONF_PATH, "w") as f:
-            f.write("# ov2n TProxy 配置\n")
+            f.write("# ov2n TProxy config\n")
             f.write(f"TPROXY_ENABLED={'true' if enabled else 'false'}\n")
             f.write(f"VPS_IP={vps_ip}\n")
             f.write(f"V2RAY_PORT={port}\n")
             f.write(f"MARK={mark}\n")
             f.write(f"TABLE={table}\n")
     except Exception as e:
-        print(f"保存 tproxy 配置失败: {e}")
+        print(f"[ov2n] ERR save tproxy config: {e}")
 
 
 # ============================================
@@ -256,13 +256,13 @@ def extract_tproxy_config_from_v2ray(config_path: str) -> Optional[Dict]:
                 break
 
         if vps_ip and tproxy_port:
-            print(f"✓ 自动提取配置成功: VPS IP={vps_ip}, TProxy端口={tproxy_port}")
+            print(f"[ov2n] OK extracted: VPS IP={vps_ip}, TProxy port={tproxy_port}")
             return {'vps_ip': vps_ip, 'tproxy_port': tproxy_port}
 
-        print(f"⚠ 配置提取不完整: VPS IP={vps_ip}, TProxy端口={tproxy_port}")
+        print(f"[ov2n] WARN extract incomplete: VPS IP={vps_ip}, TProxy port={tproxy_port}")
         return None
     except Exception as e:
-        print(f"✗ 提取配置失败: {e}")
+        print(f"[ov2n] ERR extract failed: {e}")
         return None
 
 
@@ -289,13 +289,13 @@ def validate_v2ray_config(path: str) -> bool:
         return 'inbounds' in cfg and 'outbounds' in cfg
     except (OSError, IOError) as e:
         # 文件被锁定、权限不足等 → 不能确定无效，返回 True 以避免误覆盖
-        print(f"⚠ 读取 V2Ray 配置时发生 IO 错误（视为有效以保护数据）: {e}")
+        print(f"[ov2n] WARN V2Ray config IO error (treated as valid): {e}")
         return True
     except (json.JSONDecodeError, ValueError) as e:
-        print(f"⚠ V2Ray 配置 JSON 解析失败: {e}")
+        print(f"[ov2n] WARN V2Ray config JSON parse failed: {e}")
         return False
     except Exception as e:
-        print(f"⚠ V2Ray 配置验证异常: {e}")
+        print(f"[ov2n] WARN V2Ray config validation error: {e}")
         return False
 
 
@@ -366,9 +366,9 @@ def create_default_v2ray_config(config_path: str) -> None:
         os.makedirs(os.path.dirname(config_path), exist_ok=True)
         with open(config_path, 'w', encoding='utf-8') as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
-        print("✓ 默认 V2Ray 配置已创建")
+        print("[ov2n] OK default V2Ray config created")
     except Exception as e:
-        print(f"创建默认 V2Ray 配置失败: {e}")
+        print(f"[ov2n] ERR create default V2Ray config: {e}")
 
 
 def _migrate_legacy_config_paths() -> None:
@@ -388,13 +388,13 @@ def _migrate_legacy_config_paths() -> None:
     if not os.path.exists(_LEGACY_CONFIG_PATHS_FILE):
         return
 
-    print("[ov2n] 检测到旧版 config_paths.json，开始迁移...")
+    print("[ov2n] legacy config_paths.json detected, migrating...")
 
     try:
         with open(_LEGACY_CONFIG_PATHS_FILE, 'r', encoding='utf-8') as f:
             saved = json.load(f)
     except Exception as e:
-        print(f"[ov2n] ⚠ 读取旧版 config_paths.json 失败: {e}")
+        print(f"[ov2n] WARN read legacy config_paths.json failed: {e}")
         # 读取失败也删除，避免每次启动都尝试
         _remove_legacy_config_paths_file()
         return
@@ -409,19 +409,17 @@ def _migrate_legacy_config_paths() -> None:
     if (old_vpn_path
             and os.path.exists(old_vpn_path)
             and os.path.realpath(old_vpn_path) != os.path.realpath(USER_VPN_CONFIG)):
-        # 目标位置没有文件或文件为空 → 复制
         if not os.path.exists(USER_VPN_CONFIG) or os.path.getsize(USER_VPN_CONFIG) == 0:
             try:
                 shutil.copy2(old_vpn_path, USER_VPN_CONFIG)
-                print(f"[ov2n] ✓ VPN 配置已迁移: {old_vpn_path} → {USER_VPN_CONFIG}")
+                print(f"[ov2n] OK VPN config migrated: {old_vpn_path} -> {USER_VPN_CONFIG}")
                 migrated_vpn = True
             except Exception as e:
-                print(f"[ov2n] ⚠ VPN 配置迁移失败: {e}")
+                print(f"[ov2n] WARN VPN config migration failed: {e}")
         else:
-            print(f"[ov2n] VPN 配置已存在于目标位置，跳过迁移")
-            migrated_vpn = True  # 文件已在正确位置
+            print(f"[ov2n] VPN config already at destination, skip migration")
+            migrated_vpn = True
     elif old_vpn_path and os.path.realpath(old_vpn_path) == os.path.realpath(USER_VPN_CONFIG):
-        # 旧路径就是新路径（已经在正确位置）
         if os.path.exists(USER_VPN_CONFIG) and os.path.getsize(USER_VPN_CONFIG) > 0:
             migrated_vpn = True
 
@@ -429,19 +427,17 @@ def _migrate_legacy_config_paths() -> None:
     if (old_v2ray_path
             and os.path.exists(old_v2ray_path)
             and os.path.realpath(old_v2ray_path) != os.path.realpath(USER_V2RAY_CONFIG)):
-        # 目标位置没有文件或文件为空 → 复制
         if not os.path.exists(USER_V2RAY_CONFIG) or os.path.getsize(USER_V2RAY_CONFIG) == 0:
             try:
                 shutil.copy2(old_v2ray_path, USER_V2RAY_CONFIG)
-                print(f"[ov2n] ✓ V2Ray 配置已迁移: {old_v2ray_path} → {USER_V2RAY_CONFIG}")
+                print(f"[ov2n] OK V2Ray config migrated: {old_v2ray_path} -> {USER_V2RAY_CONFIG}")
                 migrated_v2ray = True
             except Exception as e:
-                print(f"[ov2n] ⚠ V2Ray 配置迁移失败: {e}")
+                print(f"[ov2n] WARN V2Ray config migration failed: {e}")
         else:
-            print(f"[ov2n] V2Ray 配置已存在于目标位置，跳过迁移")
-            migrated_v2ray = True  # 文件已在正确位置
+            print(f"[ov2n] V2Ray config already at destination, skip migration")
+            migrated_v2ray = True
     elif old_v2ray_path and os.path.realpath(old_v2ray_path) == os.path.realpath(USER_V2RAY_CONFIG):
-        # 旧路径就是新路径（已经在正确位置）
         if os.path.exists(USER_V2RAY_CONFIG) and os.path.getsize(USER_V2RAY_CONFIG) > 0:
             migrated_v2ray = True
 
@@ -453,11 +449,10 @@ def _migrate_legacy_config_paths() -> None:
         if migrated_v2ray and not flags['v2ray']:
             flags['v2ray'] = True
         save_imported_flags(flags['vpn'], flags['v2ray'])
-        print(f"[ov2n] 导入标志已更新: vpn={flags['vpn']}, v2ray={flags['v2ray']}")
+        print(f"[ov2n] imported flags updated: vpn={flags['vpn']}, v2ray={flags['v2ray']}")
 
-    # 删除旧版文件，避免重复迁移
     _remove_legacy_config_paths_file()
-    print("[ov2n] ✓ 旧版 config_paths.json 迁移完成")
+    print("[ov2n] OK legacy config_paths.json migration done")
 
 
 def _remove_legacy_config_paths_file() -> None:
@@ -465,9 +460,9 @@ def _remove_legacy_config_paths_file() -> None:
     try:
         if os.path.exists(_LEGACY_CONFIG_PATHS_FILE):
             os.remove(_LEGACY_CONFIG_PATHS_FILE)
-            print(f"[ov2n] 已删除旧版 config_paths.json")
+            print(f"[ov2n] removed legacy config_paths.json")
     except Exception as e:
-        print(f"[ov2n] ⚠ 删除旧版 config_paths.json 失败: {e}")
+        print(f"[ov2n] WARN remove legacy config_paths.json failed: {e}")
 
 
 def init_config_dir() -> None:
@@ -488,7 +483,7 @@ def init_config_dir() -> None:
         复制到新的固定位置，确保升级后不丢失用户配置
     """
     os.makedirs(_CONFIG_DIR, exist_ok=True)
-    print(f"[ov2n] 用户配置目录: {_CONFIG_DIR}")
+    print(f"[ov2n] config dir: {_CONFIG_DIR}")
 
     # 执行旧版本迁移（如果需要）
     _migrate_legacy_config_paths()

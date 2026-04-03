@@ -19,9 +19,12 @@
 import os
 import platform
 import subprocess
+import logging
+from pathlib import Path
+from typing import Optional
 
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QMainWindow, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QWidget,
     QFileDialog, QMessageBox, QCheckBox, QLineEdit,
@@ -37,7 +40,6 @@ from core.config_manager import (
     get_user_vpn_config_path, get_user_v2ray_config_path,
 )
 from core.utils import get_app_root, validate_ip
-from core.worker import SingleVPNThread, SingleV2RayThread, CombinedStartThread
 from core.icon_helper import (
     btn_text, drop_area_prefix, check_mark,
     load_window_icon, apply_window_icon, emoji_supported,
@@ -49,8 +51,11 @@ from ui.styles import (
     status_label_style, readonly_line_edit_style,
     readonly_spinbox_style, editable_spinbox_style,
 )
+from core.vpn_process import create_managers
 
 IS_WINDOWS = platform.system() == "Windows"
+
+log = logging.getLogger("ov2n.ui")
 
 # Linux 专用导入
 if not IS_WINDOWS:
@@ -60,6 +65,113 @@ if not IS_WINDOWS:
 def _get_windows_handler():
     from core.platform.windows.privilege import WindowsPrivilegeHandler
     return WindowsPrivilegeHandler()
+
+
+# ══════════════════════════════════════════
+# 后台工作线程
+# ══════════════════════════════════════════
+
+class OpenVPNWorker(QThread):
+    """在后台线程启动 OpenVPN，避免 UI 卡死。"""
+    update_signal = pyqtSignal(str)        # 进度消息
+    error_signal = pyqtSignal(str)         # 错误信息
+    success_signal = pyqtSignal(int)       # 成功，返回 PID
+
+    def __init__(self, config_path: Path, openvpn_manager):
+        super().__init__()
+        self.config_path = config_path
+        self.manager = openvpn_manager
+
+    def run(self):
+        try:
+            self.update_signal.emit("正在启动 OpenVPN...")
+            if self.manager.start(self.config_path):
+                pid = self.manager.get_pid() or 1
+                self.update_signal.emit("OpenVPN 启动成功")
+                self.success_signal.emit(pid)
+            else:
+                self.error_signal.emit("OpenVPN 启动失败，请检查配置文件")
+        except Exception as e:
+            log.exception("OpenVPN 启动异常")
+            self.error_signal.emit(f"OpenVPN 启动异常: {e}")
+
+
+class XrayWorker(QThread):
+    """在后台线程启动 Xray，避免 UI 卡死。"""
+    update_signal = pyqtSignal(str)        # 进度消息
+    error_signal = pyqtSignal(str)         # 错误信息
+    success_signal = pyqtSignal(dict)      # 成功，返回 {"pid": int, "tproxy_ok": bool}
+
+    def __init__(self, config_path: Path, xray_manager, tproxy_enabled: bool = False):
+        super().__init__()
+        self.config_path = config_path
+        self.manager = xray_manager
+        self.tproxy_enabled = tproxy_enabled
+
+    def run(self):
+        try:
+            self.update_signal.emit("正在启动 V2Ray/Xray...")
+            if self.manager.start(self.config_path):
+                pid = self.manager.get_pid() or 1
+                self.update_signal.emit("V2Ray/Xray 启动成功")
+                self.success_signal.emit({
+                    "pid": pid,
+                    "tproxy_ok": self.tproxy_enabled and not IS_WINDOWS
+                })
+            else:
+                self.error_signal.emit("V2Ray/Xray 启动失败，请检查配置文件")
+        except Exception as e:
+            log.exception("V2Ray/Xray 启动异常")
+            self.error_signal.emit(f"V2Ray/Xray 启动异常: {e}")
+
+
+class CombinedWorker(QThread):
+    """顺序启动 OpenVPN 和 Xray，支持单侧启动。"""
+    update_signal = pyqtSignal(str)        # 进度消息
+    error_signal = pyqtSignal(str)         # 错误信息
+    success_signal = pyqtSignal(dict)      # 成功，返回 {"vpn_pid": int, "v2ray_pid": int, "warnings": []}
+
+    def __init__(self, ovpn_mgr, xray_mgr,
+                 ovpn_config: Optional[Path] = None,
+                 xray_config: Optional[Path] = None,
+                 tproxy_enabled: bool = False):
+        super().__init__()
+        self.ovpn_mgr = ovpn_mgr
+        self.xray_mgr = xray_mgr
+        self.ovpn_config = ovpn_config
+        self.xray_config = xray_config
+        self.tproxy_enabled = tproxy_enabled
+
+    def run(self):
+        result = {"vpn_pid": 0, "v2ray_pid": 0, "warnings": []}
+        try:
+            # 启动 OpenVPN（如果配置存在）
+            if self.ovpn_config and self.ovpn_config.exists():
+                self.update_signal.emit("正在启动 OpenVPN...")
+                if self.ovpn_mgr.start(self.ovpn_config):
+                    result["vpn_pid"] = self.ovpn_mgr.get_pid() or 1
+                    self.update_signal.emit("OpenVPN 启动成功")
+                else:
+                    result["warnings"].append("OpenVPN 启动失败")
+
+            # 启动 Xray（如果配置存在）
+            if self.xray_config and self.xray_config.exists():
+                self.update_signal.emit("正在启动 V2Ray/Xray...")
+                if self.xray_mgr.start(self.xray_config):
+                    result["v2ray_pid"] = self.xray_mgr.get_pid() or 1
+                    result["tproxy_ok"] = self.tproxy_enabled and not IS_WINDOWS
+                    self.update_signal.emit("V2Ray/Xray 启动成功")
+                else:
+                    result["warnings"].append("V2Ray/Xray 启动失败")
+
+            # 检查是否至少有一个服务启动成功
+            if result["vpn_pid"] or result["v2ray_pid"]:
+                self.success_signal.emit(result)
+            else:
+                self.error_signal.emit("所有服务启动失败")
+        except Exception as e:
+            log.exception("联合启动异常")
+            self.error_signal.emit(f"启动异常: {e}")
 
 
 class MainWindow(QMainWindow):
@@ -77,9 +189,12 @@ class MainWindow(QMainWindow):
         self.v2ray_pid = None
         self.tproxy_active = False
 
+        # ── 进程管理器 ────────────────────────────
+        app_root = Path(get_app_root())
+        self.openvpn_mgr, self.xray_mgr = create_managers(app_root)
+
         # ── 窗口图标 ──────────────────────────────
-        app_root = get_app_root()
-        self._window_icon = load_window_icon(app_root)
+        self._window_icon = load_window_icon(str(app_root))
         self.setWindowIcon(self._window_icon)
         app = QApplication.instance()
         if app is not None:
@@ -92,8 +207,8 @@ class MainWindow(QMainWindow):
         init_config_dir()
 
         # ── 配置路径（固定位于用户配置目录下）─────────
-        self.vpn_config_path = get_user_vpn_config_path()
-        self.v2ray_config_path = get_user_v2ray_config_path()
+        self.vpn_config_path = Path(get_user_vpn_config_path())
+        self.v2ray_config_path = Path(get_user_v2ray_config_path())
 
         # ── 导入状态 ──────────────────────────────
         # 首次运行：imported_flags 均为 False，用户配置目录下无配置文件
@@ -110,28 +225,28 @@ class MainWindow(QMainWindow):
         #         （如 imported_flags.json 丢失/损坏）→ 恢复为 True
         flags_changed = False
 
-        if self.vpn_config_imported and not os.path.exists(self.vpn_config_path):
-            print(f"[ov2n] ⚠ VPN 配置文件不存在，重置导入标志: {self.vpn_config_path}")
+        if self.vpn_config_imported and not self.vpn_config_path.exists():
+            log.warning("VPN 配置文件不存在，重置导入标志: %s", self.vpn_config_path)
             self.vpn_config_imported = False
             flags_changed = True
 
-        if self.v2ray_config_imported and not os.path.exists(self.v2ray_config_path):
-            print(f"[ov2n] ⚠ V2Ray 配置文件不存在，重置导入标志: {self.v2ray_config_path}")
+        if self.v2ray_config_imported and not self.v2ray_config_path.exists():
+            log.warning("V2Ray 配置文件不存在，重置导入标志: %s", self.v2ray_config_path)
             self.v2ray_config_imported = False
             flags_changed = True
 
         # 恢复丢失的导入标志：文件存在且包含真实 VPS 配置 → 视为已导入
         if (not self.v2ray_config_imported
-                and os.path.exists(self.v2ray_config_path)
-                and has_real_vps_config(self.v2ray_config_path)):
-            print(f"[ov2n] ✓ V2Ray 配置包含真实 VPS 信息，恢复导入标志")
+                and self.v2ray_config_path.exists()
+                and has_real_vps_config(str(self.v2ray_config_path))):
+            log.info("V2Ray 配置包含真实 VPS 信息，恢复导入标志")
             self.v2ray_config_imported = True
             flags_changed = True
 
         if (not self.vpn_config_imported
-                and os.path.exists(self.vpn_config_path)
-                and os.path.getsize(self.vpn_config_path) > 0):
-            print(f"[ov2n] ✓ VPN 配置文件存在且非空，恢复导入标志")
+                and self.vpn_config_path.exists()
+                and self.vpn_config_path.stat().st_size > 0):
+            log.info("VPN 配置文件存在且非空，恢复导入标志")
             self.vpn_config_imported = True
             flags_changed = True
 
@@ -142,8 +257,8 @@ class MainWindow(QMainWindow):
         self._auto_extract_tproxy_config()
         self._refresh_buttons()
 
-        print(f"[ov2n] emoji 支持: {emoji_supported()}")
-        print(f"[ov2n] 平台: {'Windows' if IS_WINDOWS else 'Linux'}")
+        log.info("emoji 支持: %s", emoji_supported())
+        log.info("平台: %s", "Windows" if IS_WINDOWS else "Linux")
 
     # ══════════════════════════════════════════
     # UI 构建
@@ -319,25 +434,24 @@ class MainWindow(QMainWindow):
         cm = check_mark()
         dp = drop_area_prefix()
 
-        if self.vpn_config_imported and os.path.exists(self.vpn_config_path):
-            self.vpn_drop_area.setText(f"{cm}{os.path.basename(self.vpn_config_path)}")
+        if self.vpn_config_imported and self.vpn_config_path.exists():
+            self.vpn_drop_area.setText(f"{cm}{self.vpn_config_path.name}")
             self.vpn_drop_area.setStyleSheet(drop_area_ok_style())
         else:
             self.vpn_drop_area.setText(f"{dp}点击选择或拖拽 .ovpn 配置文件到此处")
             self.vpn_drop_area.setStyleSheet(drop_area_empty_style())
 
-        if self.v2ray_config_imported and os.path.exists(self.v2ray_config_path):
-            self.v2ray_drop_area.setText(
-                f"{cm}{os.path.basename(self.v2ray_config_path)}")
+        if self.v2ray_config_imported and self.v2ray_config_path.exists():
+            self.v2ray_drop_area.setText(f"{cm}{self.v2ray_config_path.name}")
             self.v2ray_drop_area.setStyleSheet(drop_area_ok_style(pad="15px"))
         else:
             self.v2ray_drop_area.setText(f"{dp}点击选择或拖拽 config.json 到此处")
             self.v2ray_drop_area.setStyleSheet(drop_area_empty_style())
 
     def _auto_extract_tproxy_config(self):
-        if not os.path.exists(self.v2ray_config_path):
+        if not self.v2ray_config_path.exists():
             return
-        extracted = extract_tproxy_config_from_v2ray(self.v2ray_config_path)
+        extracted = extract_tproxy_config_from_v2ray(str(self.v2ray_config_path))
         if extracted:
             self.tproxy_checkbox.setChecked(True)
             self.vps_ip_input.setText(extracted['vps_ip'])
@@ -355,7 +469,7 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════
 
     def _check_vpn_ready(self) -> bool:
-        if not self.vpn_config_imported or not os.path.exists(self.vpn_config_path):
+        if not self.vpn_config_imported or not self.vpn_config_path.exists():
             QMessageBox.warning(self, "未导入 VPN 配置",
                 "请先导入 OpenVPN 配置文件 (.ovpn)。\n\n"
                 "您可以：\n"
@@ -365,7 +479,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _check_v2ray_ready(self) -> bool:
-        if not self.v2ray_config_imported or not os.path.exists(self.v2ray_config_path):
+        if not self.v2ray_config_imported or not self.v2ray_config_path.exists():
             QMessageBox.warning(self, "未导入 V2Ray 配置",
                 "请先导入 V2Ray/Shadowsocks 配置。\n\n"
                 "您可以：\n"
@@ -416,7 +530,7 @@ class MainWindow(QMainWindow):
 
         self.vpn_config_imported = True
         save_imported_flags(self.vpn_config_imported, self.v2ray_config_imported)
-        self.vpn_drop_area.setText(f"{check_mark()}{os.path.basename(source_path)}")
+        self.vpn_drop_area.setText(f"{check_mark()}{Path(source_path).name}")
         self.vpn_drop_area.setStyleSheet(drop_area_ok_style())
 
     def _on_v2ray_config_imported(self, source_path: str):
@@ -434,7 +548,7 @@ class MainWindow(QMainWindow):
 
         self.v2ray_config_imported = True
         save_imported_flags(self.vpn_config_imported, self.v2ray_config_imported)
-        self.v2ray_drop_area.setText(f"{check_mark()}{os.path.basename(source_path)}")
+        self.v2ray_drop_area.setText(f"{check_mark()}{Path(source_path).name}")
         self.v2ray_drop_area.setStyleSheet(drop_area_ok_style(pad="15px"))
         self._auto_extract_tproxy_config()
 
@@ -450,11 +564,11 @@ class MainWindow(QMainWindow):
         if path.endswith('.ovpn'):
             self._on_vpn_config_imported(path)
             QMessageBox.information(
-                self, "成功", f"已加载 OpenVPN 配置:\n{os.path.basename(path)}")
+                self, "成功", f"已加载 OpenVPN 配置:\n{Path(path).name}")
         elif path.endswith('.json'):
             self._on_v2ray_config_imported(path)
             QMessageBox.information(
-                self, "成功", f"已加载 V2Ray 配置:\n{os.path.basename(path)}")
+                self, "成功", f"已加载 V2Ray 配置:\n{Path(path).name}")
         else:
             QMessageBox.warning(
                 self, "错误", "不支持的文件类型!\n请拖拽 .ovpn 或 .json 文件")
@@ -478,7 +592,7 @@ class MainWindow(QMainWindow):
     def import_ss_from_clipboard(self):
         """从剪贴板导入 SS URL，生成的配置直接保存到用户配置目录。"""
         try:
-            os.makedirs(os.path.dirname(self.v2ray_config_path), exist_ok=True)
+            self.v2ray_config_path.parent.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             QMessageBox.critical(self, "错误", f"无法创建配置目录: {e}")
             return
@@ -486,11 +600,11 @@ class MainWindow(QMainWindow):
         # import_ss_url_from_clipboard 会将配置写入 self.v2ray_config_path
         # 由于 self.v2ray_config_path 已经指向用户配置目录，无需额外复制
         if import_ss_url_from_clipboard(
-                self, self.v2ray_config_path, replace_existing=True):
+                self, str(self.v2ray_config_path), replace_existing=True):
             self.v2ray_config_imported = True
             save_imported_flags(self.vpn_config_imported, self.v2ray_config_imported)
             self.v2ray_drop_area.setText(
-                f"{check_mark()}{os.path.basename(self.v2ray_config_path)} (已更新)")
+                f"{check_mark()}{self.v2ray_config_path.name} (已更新)")
             self.v2ray_drop_area.setStyleSheet(drop_area_ok_style(pad="15px"))
             self._auto_extract_tproxy_config()
             QMessageBox.information(
@@ -498,18 +612,18 @@ class MainWindow(QMainWindow):
                 "配置已更新，透明代理参数已自动提取。\n如需应用，请重启 V2Ray。")
 
     def edit_v2ray_config(self):
-        if not os.path.exists(self.v2ray_config_path):
+        if not self.v2ray_config_path.exists():
             try:
-                os.makedirs(os.path.dirname(self.v2ray_config_path), exist_ok=True)
+                self.v2ray_config_path.parent.mkdir(parents=True, exist_ok=True)
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"无法创建配置目录: {e}")
                 return
-            V2RayConfigManager(self.v2ray_config_path).save_config()
+            V2RayConfigManager(str(self.v2ray_config_path)).save_config()
         try:
             if IS_WINDOWS:
-                os.startfile(self.v2ray_config_path)   # type: ignore[attr-defined]
+                os.startfile(str(self.v2ray_config_path))  # type: ignore[attr-defined]
             else:
-                subprocess.Popen(["xdg-open", self.v2ray_config_path])
+                subprocess.Popen(["xdg-open", str(self.v2ray_config_path)])
             QMessageBox.information(
                 self, "提示",
                 "配置文件已在外部编辑器中打开。\n编辑完成后请重启 V2Ray 以应用更改。")
@@ -540,12 +654,12 @@ class MainWindow(QMainWindow):
             return
         self._refresh_buttons(starting=True)
         self._set_vpn_status("正在启动...", "#FF9800")
-        self._vpn_thread = SingleVPNThread(self.vpn_config_path)
-        self._vpn_thread.update_signal.connect(
+        self._vpn_worker = OpenVPNWorker(self.vpn_config_path, self.openvpn_mgr)
+        self._vpn_worker.update_signal.connect(
             lambda m: self._set_vpn_status(m, "#FF9800"))
-        self._vpn_thread.error_signal.connect(self._on_vpn_error)
-        self._vpn_thread.success_signal.connect(self._on_vpn_started)
-        self._vpn_thread.start()
+        self._vpn_worker.error_signal.connect(self._on_vpn_error)
+        self._vpn_worker.success_signal.connect(self._on_vpn_started)
+        self._vpn_worker.start()
 
     def _on_vpn_started(self, pid: int):
         self.vpn_pid = pid
@@ -565,41 +679,12 @@ class MainWindow(QMainWindow):
             return
         self.stop_vpn_button.setEnabled(False)
         self._set_vpn_status("正在停止...", "#FF9800")
-        if IS_WINDOWS:
-            self._stop_vpn_windows()
-        else:
-            self._stop_vpn_linux()
-
-    def _stop_vpn_windows(self):
         try:
-            handler = _get_windows_handler()
-            ok, msg = handler.stop_openvpn()
-            if ok:
-                self.vpn_pid = None
-                self._set_vpn_status("未连接", "#999")
-                self._refresh_buttons()
-                QMessageBox.information(self, "成功", "OpenVPN 已停止")
-            else:
-                self._refresh_buttons()
-                QMessageBox.critical(self, "错误", f"停止失败: {msg}")
-        except Exception as e:
+            self.openvpn_mgr.stop()
+            self.vpn_pid = None
+            self._set_vpn_status("未连接", "#999")
             self._refresh_buttons()
-            QMessageBox.critical(self, "错误", f"停止失败: {e}")
-
-    def _stop_vpn_linux(self):
-        try:
-            r = subprocess.run(
-                ["pkexec", PolkitHelper.HELPER_SCRIPT,
-                 "stop", "--openvpn-pid", str(self.vpn_pid)],
-                capture_output=True, text=True, timeout=30)
-            if r.returncode == 0:
-                self.vpn_pid = None
-                self._set_vpn_status("未连接", "#999")
-                self._refresh_buttons()
-                QMessageBox.information(self, "成功", "OpenVPN 已停止")
-            else:
-                self._refresh_buttons()
-                QMessageBox.critical(self, "错误", f"停止失败:\n{r.stderr}")
+            QMessageBox.information(self, "成功", "OpenVPN 已停止")
         except Exception as e:
             self._refresh_buttons()
             QMessageBox.critical(self, "错误", f"停止失败: {e}")
@@ -618,16 +703,16 @@ class MainWindow(QMainWindow):
             return
         self._refresh_buttons(starting=True)
         self._set_v2ray_status("正在启动...", "#FF9800")
-        self._v2ray_thread = SingleV2RayThread(
-            self.v2ray_config_path, **self._get_tproxy_params())
-        self._v2ray_thread.update_signal.connect(
+        tproxy_enabled = self.tproxy_checkbox.isChecked() and not IS_WINDOWS
+        self._v2ray_worker = XrayWorker(
+            self.v2ray_config_path, self.xray_mgr, tproxy_enabled)
+        self._v2ray_worker.update_signal.connect(
             lambda m: self._set_v2ray_status(m, "#FF9800"))
-        self._v2ray_thread.error_signal.connect(self._on_v2ray_error)
-        self._v2ray_thread.success_signal.connect(self._on_v2ray_started)
-        self._v2ray_thread.start()
+        self._v2ray_worker.error_signal.connect(self._on_v2ray_error)
+        self._v2ray_worker.success_signal.connect(self._on_v2ray_started)
+        self._v2ray_worker.start()
 
     def _on_v2ray_started(self, result: dict):
-        # Windows: pid=0 (服务模式)，用 1 占位表示运行中
         pid = result['pid'] or 1
         self.v2ray_pid = pid
         self.tproxy_active = result.get('tproxy_ok', False)
@@ -648,48 +733,12 @@ class MainWindow(QMainWindow):
             return
         self.stop_v2ray_button.setEnabled(False)
         self._set_v2ray_status("正在停止...", "#FF9800")
-        if IS_WINDOWS:
-            self._stop_v2ray_windows()
-        else:
-            self._stop_v2ray_linux()
-
-    def _stop_v2ray_windows(self):
         try:
-            handler = _get_windows_handler()
-            ok, msg = handler.stop_xray()
-            if ok:
-                self.v2ray_pid = None
-                self._set_v2ray_status("未连接", "#999")
-                self._refresh_buttons()
-                QMessageBox.information(self, "成功", "Xray 已停止")
-            else:
-                self._refresh_buttons()
-                QMessageBox.critical(self, "错误", f"停止失败: {msg}")
-        except Exception as e:
+            self.xray_mgr.stop()
+            self.v2ray_pid = None
+            self._set_v2ray_status("未连接", "#999")
             self._refresh_buttons()
-            QMessageBox.critical(self, "错误", f"停止失败: {e}")
-
-    def _stop_v2ray_linux(self):
-        try:
-            if self.tproxy_active:
-                PolkitHelper.stop_tproxy(
-                    self.tproxy_port_input.value(),
-                    self.vps_ip_input.text().strip(),
-                    self.mark_input.value(),
-                    self.table_input.value())
-                self.tproxy_active = False
-            r = subprocess.run(
-                ["pkexec", PolkitHelper.HELPER_SCRIPT,
-                 "stop", "--v2ray-pid", str(self.v2ray_pid)],
-                capture_output=True, text=True, timeout=30)
-            if r.returncode == 0:
-                self.v2ray_pid = None
-                self._set_v2ray_status("未连接", "#999")
-                self._refresh_buttons()
-                QMessageBox.information(self, "成功", "V2Ray 已停止")
-            else:
-                self._refresh_buttons()
-                QMessageBox.critical(self, "错误", f"停止失败:\n{r.stderr}")
+            QMessageBox.information(self, "成功", "V2Ray 已停止")
         except Exception as e:
             self._refresh_buttons()
             QMessageBox.critical(self, "错误", f"停止失败: {e}")
@@ -706,9 +755,9 @@ class MainWindow(QMainWindow):
         if IS_WINDOWS:
             # Windows：有哪个配置就启动哪个，两者都没有才报错
             vpn_ready = (self.vpn_config_imported
-                         and os.path.exists(self.vpn_config_path))
+                         and self.vpn_config_path.exists())
             v2ray_ready = (self.v2ray_config_imported
-                           and os.path.exists(self.v2ray_config_path))
+                           and self.v2ray_config_path.exists())
             if not vpn_ready and not v2ray_ready:
                 QMessageBox.warning(self, "未导入配置",
                     "请至少导入一个配置文件：\n"
@@ -721,8 +770,10 @@ class MainWindow(QMainWindow):
             if not self._validate_tproxy_params():
                 return
 
-        tproxy_params = self._get_tproxy_params()
+        self._refresh_buttons(starting=True)
+        tproxy_enabled = self.tproxy_checkbox.isChecked() and not IS_WINDOWS
         if not IS_WINDOWS:
+            tproxy_params = self._get_tproxy_params()
             save_tproxy_config(
                 tproxy_params['tproxy_enabled'],
                 tproxy_params['tproxy_vps_ip'],
@@ -730,15 +781,19 @@ class MainWindow(QMainWindow):
                 tproxy_params['tproxy_mark'],
                 tproxy_params['tproxy_table'])
 
-        self._refresh_buttons(starting=True)
-        self._combined_thread = CombinedStartThread(
-            self.vpn_config_path, self.v2ray_config_path,
-            self.vpn_pid, self.v2ray_pid,
-            **tproxy_params)
-        self._combined_thread.update_signal.connect(self._on_combined_update)
-        self._combined_thread.error_signal.connect(self._on_combined_error)
-        self._combined_thread.success_signal.connect(self._on_combined_started)
-        self._combined_thread.start()
+        # 确定要启动的配置
+        ovpn_cfg = self.vpn_config_path if (
+            self.vpn_config_imported and self.vpn_config_path.exists()) else None
+        xray_cfg = self.v2ray_config_path if (
+            self.v2ray_config_imported and self.v2ray_config_path.exists()) else None
+
+        self._combined_worker = CombinedWorker(
+            self.openvpn_mgr, self.xray_mgr,
+            ovpn_cfg, xray_cfg, tproxy_enabled)
+        self._combined_worker.update_signal.connect(self._on_combined_update)
+        self._combined_worker.error_signal.connect(self._on_combined_error)
+        self._combined_worker.success_signal.connect(self._on_combined_started)
+        self._combined_worker.start()
 
     def _on_combined_update(self, msg: str):
         if "OpenVPN" in msg:
@@ -781,8 +836,9 @@ class MainWindow(QMainWindow):
                 started.append("OpenVPN")
             if v2ray_pid:
                 started.append("V2Ray/Xray")
-            QMessageBox.information(self, "成功",
-                " + ".join(started) + " 已启动")
+            if started:
+                QMessageBox.information(self, "成功",
+                    " + ".join(started) + " 已启动")
 
     def _on_combined_error(self, err: str):
         self._refresh_buttons()
@@ -793,71 +849,19 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "没有运行中的服务")
             return
         self.stop_all_button.setEnabled(False)
-        if IS_WINDOWS:
-            self._stop_combined_windows()
-        else:
-            self._stop_combined_linux()
-
-    def _stop_combined_windows(self):
         try:
-            handler = _get_windows_handler()
-            errors = []
-
             if self.v2ray_pid:
                 self._set_v2ray_status("正在停止...", "#FF9800")
-                ok, msg = handler.stop_xray()
-                if ok:
-                    self.v2ray_pid = None
-                    self._set_v2ray_status("未连接", "#999")
-                else:
-                    errors.append(f"Xray: {msg}")
+                self.xray_mgr.stop()
+                self.v2ray_pid = None
+                self._set_v2ray_status("未连接", "#999")
 
             if self.vpn_pid:
                 self._set_vpn_status("正在停止...", "#FF9800")
-                ok, msg = handler.stop_openvpn()
-                if ok:
-                    self.vpn_pid = None
-                    self._set_vpn_status("未连接", "#999")
-                else:
-                    errors.append(f"OpenVPN: {msg}")
+                self.openvpn_mgr.stop()
+                self.vpn_pid = None
+                self._set_vpn_status("未连接", "#999")
 
-            self._refresh_buttons()
-            if errors:
-                QMessageBox.critical(self, "错误",
-                    "部分服务停止失败：\n" + "\n".join(f"• {e}" for e in errors))
-            else:
-                QMessageBox.information(self, "成功", "所有服务已停止")
-        except Exception as e:
-            self._refresh_buttons()
-            QMessageBox.critical(self, "错误", f"停止失败: {e}")
-
-    def _stop_combined_linux(self):
-        try:
-            if self.tproxy_active:
-                PolkitHelper.stop_tproxy(
-                    self.tproxy_port_input.value(),
-                    self.vps_ip_input.text().strip(),
-                    self.mark_input.value(),
-                    self.table_input.value())
-                self.tproxy_active = False
-            if self.v2ray_pid:
-                self._set_v2ray_status("正在停止...", "#FF9800")
-                r = subprocess.run(
-                    ["pkexec", PolkitHelper.HELPER_SCRIPT,
-                     "stop", "--v2ray-pid", str(self.v2ray_pid)],
-                    capture_output=True, text=True, timeout=30)
-                if r.returncode == 0:
-                    self.v2ray_pid = None
-                    self._set_v2ray_status("未连接", "#999")
-            if self.vpn_pid:
-                self._set_vpn_status("正在停止...", "#FF9800")
-                r = subprocess.run(
-                    ["pkexec", PolkitHelper.HELPER_SCRIPT,
-                     "stop", "--openvpn-pid", str(self.vpn_pid)],
-                    capture_output=True, text=True, timeout=30)
-                if r.returncode == 0:
-                    self.vpn_pid = None
-                    self._set_vpn_status("未连接", "#999")
             self._refresh_buttons()
             QMessageBox.information(self, "成功", "所有服务已停止")
         except Exception as e:

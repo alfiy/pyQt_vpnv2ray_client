@@ -13,7 +13,14 @@
 #endif
 #define MyAppPublisher "Alfiy"
 #define MyAppURL       "https://github.com/alfiy/pyQt_vpnv2ray_client"
-#define MyAppExeName   "ov2n_launcher.vbs"
+
+; ── Launcher 改为 Python 脚本，不再使用 VBScript ──────────
+; 快捷方式目标为 pythonw.exe（通过 {autopf} 定位），
+; 参数为 ov2n_launcher.py，避免 wscript.exe 触发杀毒误报。
+; 注意：MyAppExeName 仅用于卸载图标等极少数引用，
+;       快捷方式 Filename/Parameters 单独指定，见 [Icons] 节。
+#define MyAppExeName   "ov2n_launcher.py"
+#define MyAppLauncher  "pythonw.exe"
 
 ; Python 安装包路径（相对于项目根目录）
 #define PythonInstaller "resources\python\python-3.12.10-amd64.exe"
@@ -87,7 +94,10 @@ Source: "..\main.py";                     DestDir: "{app}";           Flags: ign
 Source: "..\requirements.txt";            DestDir: "{app}";           Flags: ignoreversion
 Source: "..\version.txt";                 DestDir: "{app}";           Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\ov2n.bat";                    DestDir: "{app}";           Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\ov2n_launcher.vbs";           DestDir: "{app}";           Flags: ignoreversion
+; ── ov2n_launcher.py 替代原来的 ov2n_launcher.vbs ─────────
+; 由 build_installer.bat 从 installer\src\ 复制到项目根目录后打包
+Source: "..\ov2n_launcher.py";            DestDir: "{app}";           Flags: ignoreversion
+; ov2n_launcher.vbs 已废弃，不再打包
 Source: "..\ov2n.ps1";                    DestDir: "{app}";           Flags: ignoreversion skipifsourcedoesntexist
 
 ; ── Python 源码目录 ──────────────────────────────────────
@@ -135,17 +145,21 @@ Name: "{app}\core\xray"
 
 ; ============================================================
 ; 快捷方式
+; Filename -> pythonw.exe (no wscript.exe, no antivirus false positive)
+; Parameters -> ov2n_launcher.py
+; GetPythonWPath() is defined in [Code], reads pythonw.exe path from registry
 ; ============================================================
+
 [Icons]
-; 开始菜单
-Name: "{group}\{#MyAppName} VPN Client";  Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\resources\images\ov2n.ico"; Comment: "ov2n - OpenVPN + Xray VPN Client"
-Name: "{group}\卸载 {#MyAppName}";        Filename: "{uninstallexe}"
+; 开始菜单 - Filename 指向 pythonw.exe，Parameters 传入 .py 路径，避免经过 wscript.exe
+Name: "{group}\{#MyAppName} VPN Client"; Filename: "{code:GetPythonWPath}"; Parameters: """{app}\ov2n_launcher.py"""; WorkingDir: "{app}"; IconFilename: "{app}\resources\images\ov2n.ico"; Comment: "ov2n - OpenVPN + Xray VPN Client"
+Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 
-; 桌面快捷方式（可选，由用户在向导中勾选）
-Name: "{autodesktop}\{#MyAppName} VPN Client"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\resources\images\ov2n.ico"; Tasks: desktopicon
+; 桌面快捷方式（可选）
+Name: "{autodesktop}\{#MyAppName} VPN Client"; Filename: "{code:GetPythonWPath}"; Parameters: """{app}\ov2n_launcher.py"""; WorkingDir: "{app}"; IconFilename: "{app}\resources\images\ov2n.ico"; Tasks: desktopicon
 
-; 开始菜单启动文件夹（开机自启，可选）
-Name: "{userstartup}\{#MyAppName} VPN Client"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\resources\images\ov2n.ico"; Tasks: startup
+; 开机自启（可选）
+Name: "{userstartup}\{#MyAppName} VPN Client"; Filename: "{code:GetPythonWPath}"; Parameters: """{app}\ov2n_launcher.py"""; WorkingDir: "{app}"; IconFilename: "{app}\resources\images\ov2n.ico"; Tasks: startup
 
 ; ============================================================
 ; 可选任务（在向导中显示勾选框）
@@ -172,8 +186,6 @@ var
   TAPInstalled:    Boolean;
 
 // ── 检测 Python 是否已安装 ───────────────────────────────
-// 依次检查 HKLM / HKCU 中 3.10 ~ 3.12 的注册表路径，
-// 最后回退到直接执行 python --version
 function IsPythonInstalled(): Boolean;
 var
   PythonPath: String;
@@ -186,7 +198,6 @@ begin
   if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.12\InstallPath', '', PythonPath) then begin Result := True; Exit; end;
   if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.11\InstallPath', '', PythonPath) then begin Result := True; Exit; end;
   if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.10\InstallPath', '', PythonPath) then begin Result := True; Exit; end;
-  // 兜底：尝试直接执行
   if Exec('python', '--version', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     if ResultCode = 0 then begin Result := True; Exit; end;
 end;
@@ -202,16 +213,13 @@ begin
   if RegQueryStringValue(HKLM, 'SOFTWARE\OpenVPN\TapAdapter', '', TAPVersion)  then begin Result := True; Exit; end;
 end;
 
-// ── 从注册表读取 Python 完整可执行路径 ───────────────────
-// 新安装的 Python 在当前进程的 PATH 中还未生效，
-// 必须从注册表直接拼出完整路径才能调用。
-// Pascal Script 不支持嵌套函数，直接内联判断逻辑。
+// ── 从注册表读取 python.exe 完整路径 ─────────────────────
+// 用于 pip 安装依赖，不依赖当前进程 PATH
 function GetPythonExePath(): String;
 var
   InstallPath: String;
 begin
-  Result := 'python'; // 最终兜底：依赖 PATH
-
+  Result := 'python'; // 兜底
   if RegQueryStringValue(HKLM, 'SOFTWARE\Python\PythonCore\3.12\InstallPath', '', InstallPath) then begin
     if FileExists(InstallPath + 'python.exe')  then begin Result := InstallPath + 'python.exe';  Exit; end;
     if FileExists(InstallPath + '\python.exe') then begin Result := InstallPath + '\python.exe'; Exit; end;
@@ -238,8 +246,43 @@ begin
   end;
 end;
 
+// ── 从注册表读取 pythonw.exe 完整路径 ────────────────────
+// 供 [Icons] 节的 {code:GetPythonWPath} 调用，
+// 快捷方式 Filename 指向 pythonw.exe 而非 wscript.exe，
+// 从而避免杀毒软件对 wscript.exe + .vbs 组合的误报。
+// Param 参数为 Inno Setup 回调约定，固定传空字符串，忽略即可。
+function GetPythonWPath(Param: String): String;
+var
+  InstallPath: String;
+begin
+  Result := 'pythonw.exe'; // 兜底：依赖 PATH
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Python\PythonCore\3.12\InstallPath', '', InstallPath) then begin
+    if FileExists(InstallPath + 'pythonw.exe')  then begin Result := InstallPath + 'pythonw.exe';  Exit; end;
+    if FileExists(InstallPath + '\pythonw.exe') then begin Result := InstallPath + '\pythonw.exe'; Exit; end;
+  end;
+  if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.12\InstallPath', '', InstallPath) then begin
+    if FileExists(InstallPath + 'pythonw.exe')  then begin Result := InstallPath + 'pythonw.exe';  Exit; end;
+    if FileExists(InstallPath + '\pythonw.exe') then begin Result := InstallPath + '\pythonw.exe'; Exit; end;
+  end;
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Python\PythonCore\3.11\InstallPath', '', InstallPath) then begin
+    if FileExists(InstallPath + 'pythonw.exe')  then begin Result := InstallPath + 'pythonw.exe';  Exit; end;
+    if FileExists(InstallPath + '\pythonw.exe') then begin Result := InstallPath + '\pythonw.exe'; Exit; end;
+  end;
+  if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.11\InstallPath', '', InstallPath) then begin
+    if FileExists(InstallPath + 'pythonw.exe')  then begin Result := InstallPath + 'pythonw.exe';  Exit; end;
+    if FileExists(InstallPath + '\pythonw.exe') then begin Result := InstallPath + '\pythonw.exe'; Exit; end;
+  end;
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Python\PythonCore\3.10\InstallPath', '', InstallPath) then begin
+    if FileExists(InstallPath + 'pythonw.exe')  then begin Result := InstallPath + 'pythonw.exe';  Exit; end;
+    if FileExists(InstallPath + '\pythonw.exe') then begin Result := InstallPath + '\pythonw.exe'; Exit; end;
+  end;
+  if RegQueryStringValue(HKCU, 'SOFTWARE\Python\PythonCore\3.10\InstallPath', '', InstallPath) then begin
+    if FileExists(InstallPath + 'pythonw.exe')  then begin Result := InstallPath + 'pythonw.exe';  Exit; end;
+    if FileExists(InstallPath + '\pythonw.exe') then begin Result := InstallPath + '\pythonw.exe'; Exit; end;
+  end;
+end;
+
 // ── 安装向导初始化 ────────────────────────────────────────
-// 在文件复制前检测当前环境，结果保存到全局变量
 procedure InitializeWizard();
 begin
   PythonInstalled := IsPythonInstalled();
@@ -255,22 +298,14 @@ var
   PythonExe:  String;
   TAPExe:     String;
 begin
-  // =========================================================
-  // 关键说明：
-  //   ssInstall  阶段 = Inno Setup 正在解压文件，{tmp} 尚未就绪
-  //   ssPostInstall 阶段 = 所有文件已解压完毕，{tmp} 中的
-  //                         Python/TAP 安装包此时才可读取
-  // 因此 Python、TAP、pip 三步全部放在 ssPostInstall 执行。
-  // =========================================================
   if CurStep = ssPostInstall then
   begin
     TmpDir := ExpandConstant('{tmp}');
     AppDir := ExpandConstant('{app}');
 
-    // 确保日志目录存在
     ForceDirectories(AppDir + '\logs');
 
-    // ── Step 1: 安装 Python（如果目标机器未安装）──────────
+    // ── Step 1: 安装 Python ───────────────────────────────
     if not PythonInstalled then
     begin
       PythonExe := TmpDir + '\python-3.12.10-amd64.exe';
@@ -300,14 +335,13 @@ begin
           mbError, MB_OK);
     end;
 
-    // ── Step 2: 安装 TAP-Windows 驱动（如果未安装）────────
+    // ── Step 2: 安装 TAP-Windows 驱动 ────────────────────
     if not TAPInstalled then
     begin
       TAPExe := TmpDir + '\tap-windows-installer.exe';
       if FileExists(TAPExe) then
       begin
         WizardForm.StatusLabel.Caption := ExpandConstant('{cm:InstallingTAP}');
-        // /S = NSIS 静默安装参数
         Exec(TAPExe, '/S', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
         if ResultCode <> 0 then
           MsgBox(
@@ -324,39 +358,29 @@ begin
           mbError, MB_OK);
     end;
 
-    // ── Step 3: 安装 Python 依赖（PyQt5 等）──────────────
-    // 刚装完 Python 后注册表已写入，通过注册表获取完整路径，
-    // 不依赖当前进程的 PATH（新安装的 Python 在本进程中尚未生效）
+    // ── Step 3: 安装 Python 依赖 ──────────────────────────
     PythonExe := GetPythonExePath();
 
-    // 升级 pip（失败不阻断后续步骤）
     WizardForm.StatusLabel.Caption := 'Upgrading pip...';
     Exec(PythonExe,
       '-m pip install --upgrade pip --quiet',
       AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // 从 requirements.txt 安装所有依赖
     WizardForm.StatusLabel.Caption := ExpandConstant('{cm:InstallingDeps}');
     if FileExists(AppDir + '\requirements.txt') then
     begin
       Exec(PythonExe,
         '-m pip install -r "' + AppDir + '\requirements.txt" --quiet',
         AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
-
-      // requirements.txt 安装失败时兜底：直接装 PyQt5
       if ResultCode <> 0 then
         Exec(PythonExe,
           '-m pip install PyQt5 --quiet',
           AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end else
-    begin
-      // 找不到 requirements.txt，直接装 PyQt5
       Exec(PythonExe,
         '-m pip install PyQt5 --quiet',
         AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    end;
 
-    // 清空状态栏
     WizardForm.StatusLabel.Caption := '';
   end;
 end;
@@ -405,7 +429,7 @@ begin
     end;
   end;
 
-  // ── 卸载完成后删除安装目录（处理非空目录残留）────────
+  // ── 卸载完成后删除安装目录 ────────────────────────────
   if CurUninstallStep = usPostUninstall then
   begin
     if DirExists(ExpandConstant('{app}')) then
