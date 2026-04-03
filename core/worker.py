@@ -21,7 +21,7 @@ from typing import Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from vpn_process import create_managers
+from core.vpn_process import create_managers
 
 IS_WINDOWS = platform.system() == "Windows"
 

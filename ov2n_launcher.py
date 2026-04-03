@@ -1,78 +1,97 @@
-"""
+r"""
 ov2n VPN Client Launcher
 ========================
-替代 ov2n.vbs，避免 wscript.exe 触发杀毒误报。
+Shortcut target:
+  pythonw.exe "C:\path\to\ov2n_launcher.py"
 
-使用方式：
-  - 直接双击运行（需关联 pythonw.exe 或 python.exe）
-  - 或在桌面快捷方式中指向此文件：
-      目标: pythonw.exe "C:\path\to\ov2n_launcher.py"
+提权流程：
+  1. 普通权限启动 -> 检测到非管理员
+  2. ShellExecuteW runas 触发 Windows 标准 UAC 弹窗
+  3. 用户点「是」-> Windows 以管理员权限重新运行本脚本
+  4. 检测到已是管理员 -> subprocess.Popen 启动 main.py 后退出
 
-原理：
-  - 不使用 wscript.exe / cscript.exe
-  - 不使用 cmd /c start /b（隐藏窗口启动）
-  - 使用 subprocess.Popen 以 DETACHED 方式启动 main.py
-  - 进程可在任务管理器中正常看到，行为透明
+os.execv 在 Windows 上不可靠（管理员 token 不继承），
+改用 subprocess.Popen 继承当前进程的管理员权限。
 """
-
-import sys
+import ctypes
 import os
 import subprocess
+import sys
 
-def find_python() -> str:
-    """
-    找到系统中可用的 pythonw.exe（无控制台窗口）。
-    优先用与本启动器相同的解释器，保证依赖一致。
-    """
-    # 1. 优先使用当前解释器同目录下的 pythonw.exe
-    current_dir = os.path.dirname(sys.executable)
-    pythonw = os.path.join(current_dir, "pythonw.exe")
-    if os.path.exists(pythonw):
-        return pythonw
 
-    # 2. 回退：尝试 PATH 中的 pythonw
+def is_admin() -> bool:
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def find_pythonw() -> str:
+    d = os.path.dirname(sys.executable)
+    pw = os.path.join(d, "pythonw.exe")
+    if os.path.exists(pw):
+        return pw
     import shutil
     found = shutil.which("pythonw")
-    if found:
-        return found
-
-    # 3. 最后回退：用当前解释器（会有短暂黑框）
-    return sys.executable
+    return found if found else sys.executable
 
 
-def main():
-    # 本文件所在目录即应用根目录
-    app_dir = os.path.dirname(os.path.abspath(__file__))
+def elevate_and_restart(script: str, app_dir: str) -> None:
+    """触发 UAC 弹窗，以管理员身份重新运行本脚本。"""
+    pythonw = find_pythonw()
+
+    # ShellExecuteW(hwnd, verb, file, params, dir, show)
+    # runas -> 触发系统 UAC 弹窗，Windows 负责提权，行为完全透明
+    ret = ctypes.windll.shell32.ShellExecuteW(
+        None,
+        "runas",
+        pythonw,
+        f'"{script}"',
+        app_dir,
+        1,          # SW_SHOWNORMAL
+    )
+
+    if ret <= 32:
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            "ov2n 需要管理员权限才能管理 VPN 网络接口。\n\n"
+            "请在 UAC 弹窗中点击「是」，\n"
+            "或右键桌面快捷方式选择「以管理员身份运行」。",
+            "ov2n - 需要管理员权限",
+            0x30,   # MB_ICONWARNING
+        )
+
+    # 无论 UAC 成功与否，当前非管理员进程退出
+    sys.exit(0)
+
+
+def main() -> None:
+    script  = os.path.abspath(__file__)
+    app_dir = os.path.dirname(script)
     main_py = os.path.join(app_dir, "main.py")
 
     if not os.path.exists(main_py):
-        # 只有找不到文件时才弹窗，正常启动全程无 UI
-        import ctypes
         ctypes.windll.user32.MessageBoxW(
             0,
-            f"main.py 未找到：\n{main_py}",
-            "ov2n 启动失败",
-            0x10,  # MB_ICONERROR
+            f"main.py not found:\n{main_py}",
+            "ov2n",
+            0x10,   # MB_ICONERROR
         )
         sys.exit(1)
 
-    pythonw = find_python()
+    if not is_admin():
+        # 非管理员 -> 触发 UAC，以管理员重新运行本脚本
+        elevate_and_restart(script, app_dir)
+        # 上面内部调用 sys.exit，此行不会执行
 
-    # DETACHED_PROCESS: 子进程脱离当前进程组，关闭启动器后 main.py 继续运行
-    # CREATE_NO_WINDOW: 不创建控制台窗口（pythonw 本身已无窗口，双保险）
-    DETACHED_PROCESS = 0x00000008
-    CREATE_NO_WINDOW = 0x08000000
-
+    # 已是管理员 -> 用 subprocess.Popen 启动 main.py
+    # 不加任何 creationflags，直接继承当前进程的管理员 token
+    pythonw = find_pythonw()
     subprocess.Popen(
         [pythonw, main_py],
         cwd=app_dir,
-        creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
-        # 不捕获 stdout/stderr，让 main.py 自己管理日志
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
     )
-    # 启动器立即退出，main.py 在后台独立运行
+    # launcher 使命完成，退出
     sys.exit(0)
 
 
