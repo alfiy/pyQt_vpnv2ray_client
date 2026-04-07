@@ -1,5 +1,5 @@
 """
-ov2n Process Manager - 跨平台进程管理器
+ov2n Process Manager - 跨平台进程管理器（支持 TProxy）
 """
 import json
 import logging
@@ -147,26 +147,54 @@ class _WindowsProcessManager:
         return found if found else sys.executable
 
 
-# ==================== Linux 实现 ====================
+# ==================== Linux 实现（支持 TProxy） ====================
 
 class _LinuxProcessManager:
-    """Linux: 直接调用 vpn_helper.py + pkexec"""
+    """Linux: 直接调用 vpn_helper.py + pkexec，支持 TProxy 透明代理"""
 
     def __init__(self, app_root: Path):
         self.app_root = app_root
         self._lock = Lock()
         self.xray_pid: int = 0
         self.openvpn_pid: int = 0
-        self._vpn_helper = self.app_root / "polkit" / "vpn_helper.py"
-        log.info("ProcessManager(Linux) init, app_root=%s", app_root)
+        self._tproxy_configured = False
+        self._vps_ip: Optional[str] = None
+
+        # 尝试多个可能的路径
+        possible_paths = [
+            app_root / "polkit" / "vpn_helper.py",
+            app_root / "core" / "vpn_helper.py",
+            app_root / "vpn_helper.py",
+            Path("/usr/local/lib/ov2n/polkit/vpn_helper.py"),
+            Path("/usr/local/lib/ov2n/core/vpn_helper.py"),
+        ]
+
+        self._vpn_helper = None
+        for path in possible_paths:
+            log.info("Checking vpn_helper path: %s (exists=%s)", path, path.exists())
+            if path.exists():
+                self._vpn_helper = path
+                log.info("Found vpn_helper at: %s", path)
+                break
+
+        if self._vpn_helper is None:
+            self._vpn_helper = app_root / "polkit" / "vpn_helper.py"
+            log.error("vpn_helper.py not found in any of: %s", [str(p) for p in possible_paths])
+
+        log.info("ProcessManager(Linux) init, app_root=%s, vpn_helper=%s", app_root, self._vpn_helper)
 
     def _run_vpn_helper(self, args: list, on_log: Optional[Callable[[str], None]] = None) -> tuple:
         """使用 pkexec 运行 vpn_helper.py"""
         import subprocess
 
-        if not self._vpn_helper.exists():
-            log.error("vpn_helper.py not found: %s", self._vpn_helper)
-            return False, "vpn_helper.py not found"
+        if self._vpn_helper is None or not self._vpn_helper.exists():
+            error_msg = f"vpn_helper.py not found at {self._vpn_helper}"
+            log.error(error_msg)
+            if self._vpn_helper:
+                parent = self._vpn_helper.parent
+                if parent.exists():
+                    log.info("Contents of %s: %s", parent, list(parent.iterdir()))
+            return False, error_msg
 
         cmd = ["pkexec", sys.executable, str(self._vpn_helper)] + args
         log.info("Running: %s", " ".join(cmd))
@@ -202,9 +230,43 @@ class _LinuxProcessManager:
                     continue
         return 0
 
+    def _setup_tproxy(self, vps_ip: str, v2ray_port: int = 12345, on_log: Optional[Callable[[str], None]] = None) -> bool:
+        """配置 TProxy 透明代理"""
+        if not vps_ip:
+            log.error("VPS IP not provided, cannot setup TProxy")
+            return False
+
+        log.info("Setting up TProxy with VPS IP: %s, port: %d", vps_ip, v2ray_port)
+        success, output = self._run_vpn_helper([
+            "tproxy-start",
+            "--vps-ip", vps_ip,
+            "--port", str(v2ray_port)
+        ], on_log)
+
+        if success and "TPROXY_STATUS: OK" in output:
+            log.info("TProxy setup successfully")
+            self._tproxy_configured = True
+            return True
+        else:
+            log.error("TProxy setup failed: %s", output)
+            return False
+
+    def _cleanup_tproxy(self, v2ray_port: int = 12345, on_log: Optional[Callable[[str], None]] = None) -> bool:
+        """清理 TProxy 配置"""
+        log.info("Cleaning up TProxy")
+        success, output = self._run_vpn_helper([
+            "tproxy-stop",
+            "--port", str(v2ray_port)
+        ], on_log)
+
+        if success:
+            self._tproxy_configured = False
+            return True
+        return False
+
     def ensure_helper_running(self) -> bool:
         """Linux 不需要常驻 helper"""
-        return self._vpn_helper.exists()
+        return self._vpn_helper is not None and self._vpn_helper.exists()
 
     def send_command(self, cmd: dict, on_log: Optional[Callable[[str], None]] = None) -> dict:
         """命令分发"""
@@ -216,14 +278,43 @@ class _LinuxProcessManager:
 
             elif action == "start_xray":
                 config = cmd.get("config")
+                vps_ip = cmd.get("vps_ip") or self._vps_ip
+                v2ray_port = cmd.get("v2ray_port", 12345)
+
                 if not config:
                     return {"ok": False, "message": "config required"}
+
+                # 保存 VPS IP 供后续使用
+                if vps_ip:
+                    self._vps_ip = vps_ip
+
+                # 1. 启动 V2Ray
                 success, output = self._run_vpn_helper(["start-v2ray-only", config], on_log)
-                if success:
-                    self.xray_pid = self._parse_pid(output)
-                return {"ok": success, "pid": self.xray_pid, "message": "xray started" if success else output}
+                if not success:
+                    return {"ok": False, "pid": 0, "message": output}
+
+                self.xray_pid = self._parse_pid(output)
+
+                # 2. 配置 TProxy（如果提供了 VPS IP）
+                if vps_ip:
+                    tproxy_ok = self._setup_tproxy(vps_ip, v2ray_port, on_log)
+                    if not tproxy_ok:
+                        # TProxy 失败，停止 V2Ray
+                        self._run_vpn_helper(["stop", "--v2ray-pid", str(self.xray_pid)])
+                        self.xray_pid = 0
+                        return {"ok": False, "pid": 0, "message": "V2Ray started but TProxy setup failed"}
+
+                return {
+                    "ok": True, 
+                    "pid": self.xray_pid,
+                    "message": "xray and tproxy started" if vps_ip else "xray started (no tproxy)"
+                }
 
             elif action == "stop_xray":
+                # 先清理 TProxy，再停止 V2Ray
+                if self._tproxy_configured:
+                    self._cleanup_tproxy(on_log=on_log)
+
                 if self.xray_pid:
                     success, output = self._run_vpn_helper(["stop", "--v2ray-pid", str(self.xray_pid)], on_log)
                     if success:
@@ -249,6 +340,10 @@ class _LinuxProcessManager:
                 return {"ok": True, "message": "not running"}
 
             elif action == "stop_all":
+                # 先清理 TProxy
+                if self._tproxy_configured:
+                    self._cleanup_tproxy(on_log=on_log)
+
                 args = ["stop"]
                 if self.openvpn_pid:
                     args.extend(["--openvpn-pid", str(self.openvpn_pid)])
@@ -270,6 +365,7 @@ class _LinuxProcessManager:
                     "xray_pid": self.xray_pid,
                     "openvpn_running": self.openvpn_pid > 0,
                     "openvpn_pid": self.openvpn_pid,
+                    "tproxy_configured": self._tproxy_configured,
                 }
 
             elif action == "exit":
@@ -284,7 +380,7 @@ class _LinuxProcessManager:
 
     def is_helper_running(self) -> bool:
         """检查 vpn_helper.py 是否存在"""
-        return self._vpn_helper.exists()
+        return self._vpn_helper is not None and self._vpn_helper.exists()
 
 
 # ==================== 工厂函数 ====================

@@ -126,12 +126,16 @@ class CombinedWorker(QThread):
     def __init__(self, proc_mgr,
                  ovpn_config: Optional[Path] = None,
                  xray_config: Optional[Path] = None,
-                 tproxy_enabled: bool = False):
+                 tproxy_enabled: bool = False,
+                 vps_ip: str = "",
+                 v2ray_port: int = 12345):
         super().__init__()
         self.proc_mgr = proc_mgr
         self.ovpn_config = ovpn_config
         self.xray_config = xray_config
         self.tproxy_enabled = tproxy_enabled
+        self.vps_ip = vps_ip
+        self.v2ray_port = v2ray_port
  
     def run(self):
         result = {"vpn_pid": 0, "v2ray_pid": 0, "warnings": []}
@@ -154,13 +158,20 @@ class CombinedWorker(QThread):
         # 启动 Xray（如果配置存在）
         if self.xray_config and self.xray_config.exists():
             self.update_signal.emit("正在启动 Xray...")
+            cmd = {"action": "start_xray", "config": str(self.xray_config)}
+            # Linux 需要传递 vps_ip 才能启动 TProxy
+            if self.tproxy_enabled and self.vps_ip:
+                cmd["vps_ip"] = self.vps_ip
+                cmd["v2ray_port"] = self.v2ray_port
+
             resp = self.proc_mgr.send_command(
-                {"action": "start_xray", "config": str(self.xray_config)},
+                cmd,
                 on_log=lambda m: self.update_signal.emit(m),
             )
             if resp.get("ok"):
                 result["v2ray_pid"] = resp.get("pid", 1) or 1
                 self.proc_mgr.xray_pid = result["v2ray_pid"]
+                result["tproxy_ok"] = "tproxy" in resp.get("message", "").lower()
                 self.update_signal.emit("Xray 启动成功")
             else:
                 result["warnings"].append(
@@ -705,8 +716,11 @@ class MainWindow(QMainWindow):
         self._refresh_buttons(starting=True)
         self._set_v2ray_status("正在启动...", "#FF9800")
         tproxy_enabled = self.tproxy_checkbox.isChecked() and not IS_WINDOWS
+        # 获取 TProxy 参数
+        vps_ip = self.vps_ip_input.text().strip() if tproxy_enabled else ""
+        v2ray_port = self.tproxy_port_input.value() if tproxy_enabled else 12345
         self._v2ray_worker = XrayWorker(
-            self.v2ray_config_path, self._proc_mgr, tproxy_enabled)
+            self.v2ray_config_path, self._proc_mgr, tproxy_enabled, vps_ip, v2ray_port)
         self._v2ray_worker.update_signal.connect(
             lambda m: self._set_v2ray_status(m, "#FF9800"))
         self._v2ray_worker.error_signal.connect(self._on_v2ray_error)
@@ -788,8 +802,15 @@ class MainWindow(QMainWindow):
         xray_cfg = self.v2ray_config_path if (
             self.v2ray_config_imported and self.v2ray_config_path.exists()) else None
 
+        # 获取 TProxy 参数
+        vps_ip = ""
+        v2ray_port = 12345
+        if tproxy_enabled:
+            vps_ip = self.vps_ip_input.text().strip()
+            v2ray_port = self.tproxy_port_input.value()
+
         self._combined_worker = CombinedWorker(
-            self._proc_mgr, ovpn_cfg, xray_cfg, tproxy_enabled)
+            self._proc_mgr, ovpn_cfg, xray_cfg, tproxy_enabled, vps_ip, v2ray_port)
         self._combined_worker.update_signal.connect(self._on_combined_update)
         self._combined_worker.error_signal.connect(self._on_combined_error)
         self._combined_worker.success_signal.connect(self._on_combined_started)
