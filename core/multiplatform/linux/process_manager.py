@@ -7,7 +7,7 @@ import signal
 import subprocess
 from typing import Optional
 
-from core.platform.base import ProcessManager
+from core.multiplatform.base import ProcessManager
 
 
 class LinuxProcessManager(ProcessManager):

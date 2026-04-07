@@ -51,7 +51,8 @@ from ui.styles import (
     status_label_style, readonly_line_edit_style,
     readonly_spinbox_style, editable_spinbox_style,
 )
-from core.vpn_process import create_managers
+from core.process_manager import ProcessManager
+
 
 IS_WINDOWS = platform.system() == "Windows"
 
@@ -62,116 +63,115 @@ if not IS_WINDOWS:
     from core.polkit_helper import PolkitHelper
 
 
-def _get_windows_handler():
-    from core.platform.windows.privilege import WindowsPrivilegeHandler
-    return WindowsPrivilegeHandler()
-
-
 # ══════════════════════════════════════════
 # 后台工作线程
 # ══════════════════════════════════════════
 
 class OpenVPNWorker(QThread):
-    """在后台线程启动 OpenVPN，避免 UI 卡死。"""
-    update_signal = pyqtSignal(str)        # 进度消息
-    error_signal = pyqtSignal(str)         # 错误信息
-    success_signal = pyqtSignal(int)       # 成功，返回 PID
-
-    def __init__(self, config_path: Path, openvpn_manager):
+    """启动 OpenVPN，通过 ProcessManager -> admin_helper 执行（管理员）。"""
+    update_signal  = pyqtSignal(str)
+    error_signal   = pyqtSignal(str)
+    success_signal = pyqtSignal(int)   # pid
+ 
+    def __init__(self, config_path: Path, proc_mgr):
         super().__init__()
         self.config_path = config_path
-        self.manager = openvpn_manager
-
+        self.proc_mgr = proc_mgr
+ 
     def run(self):
-        try:
-            self.update_signal.emit("正在启动 OpenVPN...")
-            if self.manager.start(self.config_path):
-                pid = self.manager.get_pid() or 1
-                self.update_signal.emit("OpenVPN 启动成功")
-                self.success_signal.emit(pid)
-            else:
-                self.error_signal.emit("OpenVPN 启动失败，请检查配置文件")
-        except Exception as e:
-            log.exception("OpenVPN 启动异常")
-            self.error_signal.emit(f"OpenVPN 启动异常: {e}")
+        self.update_signal.emit("正在请求管理员权限...")
+        result = self.proc_mgr.send_command(
+            {"action": "start_openvpn", "config": str(self.config_path)},
+            on_log=lambda m: self.update_signal.emit(m),
+        )
+        if result.get("ok"):
+            pid = result.get("pid", 1) or 1
+            self.proc_mgr.openvpn_pid = pid
+            self.success_signal.emit(pid)
+        else:
+            self.error_signal.emit(result.get("message", "OpenVPN 启动失败"))
 
 
 class XrayWorker(QThread):
-    """在后台线程启动 Xray，避免 UI 卡死。"""
-    update_signal = pyqtSignal(str)        # 进度消息
-    error_signal = pyqtSignal(str)         # 错误信息
-    success_signal = pyqtSignal(dict)      # 成功，返回 {"pid": int, "tproxy_ok": bool}
-
-    def __init__(self, config_path: Path, xray_manager, tproxy_enabled: bool = False):
+    """启动 Xray，通过 ProcessManager -> admin_helper 执行（管理员）。"""
+    update_signal  = pyqtSignal(str)
+    error_signal   = pyqtSignal(str)
+    success_signal = pyqtSignal(dict)  # {"pid": int, "tproxy_ok": bool}
+ 
+    def __init__(self, config_path: Path, proc_mgr, tproxy_enabled: bool = False):
         super().__init__()
         self.config_path = config_path
-        self.manager = xray_manager
+        self.proc_mgr = proc_mgr
         self.tproxy_enabled = tproxy_enabled
-
+ 
     def run(self):
-        try:
-            self.update_signal.emit("正在启动 V2Ray/Xray...")
-            if self.manager.start(self.config_path):
-                pid = self.manager.get_pid() or 1
-                self.update_signal.emit("V2Ray/Xray 启动成功")
-                self.success_signal.emit({
-                    "pid": pid,
-                    "tproxy_ok": self.tproxy_enabled and not IS_WINDOWS
-                })
-            else:
-                self.error_signal.emit("V2Ray/Xray 启动失败，请检查配置文件")
-        except Exception as e:
-            log.exception("V2Ray/Xray 启动异常")
-            self.error_signal.emit(f"V2Ray/Xray 启动异常: {e}")
-
+        self.update_signal.emit("正在请求管理员权限...")
+        result = self.proc_mgr.send_command(
+            {"action": "start_xray", "config": str(self.config_path)},
+            on_log=lambda m: self.update_signal.emit(m),
+        )
+        if result.get("ok"):
+            pid = result.get("pid", 1) or 1
+            self.proc_mgr.xray_pid = pid
+            self.success_signal.emit({"pid": pid, "tproxy_ok": False})
+        else:
+            self.error_signal.emit(result.get("message", "Xray 启动失败"))
 
 class CombinedWorker(QThread):
-    """顺序启动 OpenVPN 和 Xray，支持单侧启动。"""
-    update_signal = pyqtSignal(str)        # 进度消息
-    error_signal = pyqtSignal(str)         # 错误信息
-    success_signal = pyqtSignal(dict)      # 成功，返回 {"vpn_pid": int, "v2ray_pid": int, "warnings": []}
-
-    def __init__(self, ovpn_mgr, xray_mgr,
+    """顺序启动 OpenVPN + Xray，支持单侧启动。"""
+    update_signal  = pyqtSignal(str)
+    error_signal   = pyqtSignal(str)
+    success_signal = pyqtSignal(dict)  # {"vpn_pid", "v2ray_pid", "warnings"}
+ 
+    def __init__(self, proc_mgr,
                  ovpn_config: Optional[Path] = None,
                  xray_config: Optional[Path] = None,
                  tproxy_enabled: bool = False):
         super().__init__()
-        self.ovpn_mgr = ovpn_mgr
-        self.xray_mgr = xray_mgr
+        self.proc_mgr = proc_mgr
         self.ovpn_config = ovpn_config
         self.xray_config = xray_config
         self.tproxy_enabled = tproxy_enabled
-
+ 
     def run(self):
         result = {"vpn_pid": 0, "v2ray_pid": 0, "warnings": []}
-        try:
-            # 启动 OpenVPN（如果配置存在）
-            if self.ovpn_config and self.ovpn_config.exists():
-                self.update_signal.emit("正在启动 OpenVPN...")
-                if self.ovpn_mgr.start(self.ovpn_config):
-                    result["vpn_pid"] = self.ovpn_mgr.get_pid() or 1
-                    self.update_signal.emit("OpenVPN 启动成功")
-                else:
-                    result["warnings"].append("OpenVPN 启动失败")
-
-            # 启动 Xray（如果配置存在）
-            if self.xray_config and self.xray_config.exists():
-                self.update_signal.emit("正在启动 V2Ray/Xray...")
-                if self.xray_mgr.start(self.xray_config):
-                    result["v2ray_pid"] = self.xray_mgr.get_pid() or 1
-                    result["tproxy_ok"] = self.tproxy_enabled and not IS_WINDOWS
-                    self.update_signal.emit("V2Ray/Xray 启动成功")
-                else:
-                    result["warnings"].append("V2Ray/Xray 启动失败")
-
-            # 检查是否至少有一个服务启动成功
-            if result["vpn_pid"] or result["v2ray_pid"]:
-                self.success_signal.emit(result)
+ 
+        # 启动 OpenVPN（如果配置存在）
+        if self.ovpn_config and self.ovpn_config.exists():
+            self.update_signal.emit("正在启动 OpenVPN...")
+            resp = self.proc_mgr.send_command(
+                {"action": "start_openvpn", "config": str(self.ovpn_config)},
+                on_log=lambda m: self.update_signal.emit(m),
+            )
+            if resp.get("ok"):
+                result["vpn_pid"] = resp.get("pid", 1) or 1
+                self.proc_mgr.openvpn_pid = result["vpn_pid"]
+                self.update_signal.emit("OpenVPN 启动成功")
             else:
-                self.error_signal.emit("所有服务启动失败")
-        except Exception as e:
-            log.exception("联合启动异常")
-            self.error_signal.emit(f"启动异常: {e}")
+                result["warnings"].append(
+                    f"OpenVPN: {resp.get('message', '启动失败')}")
+ 
+        # 启动 Xray（如果配置存在）
+        if self.xray_config and self.xray_config.exists():
+            self.update_signal.emit("正在启动 Xray...")
+            resp = self.proc_mgr.send_command(
+                {"action": "start_xray", "config": str(self.xray_config)},
+                on_log=lambda m: self.update_signal.emit(m),
+            )
+            if resp.get("ok"):
+                result["v2ray_pid"] = resp.get("pid", 1) or 1
+                self.proc_mgr.xray_pid = result["v2ray_pid"]
+                self.update_signal.emit("Xray 启动成功")
+            else:
+                result["warnings"].append(
+                    f"Xray: {resp.get('message', '启动失败')}")
+ 
+        if result["vpn_pid"] or result["v2ray_pid"]:
+            self.success_signal.emit(result)
+        else:
+            self.error_signal.emit(
+                "所有服务启动失败:\n" +
+                "\n".join(f"• {w}" for w in result["warnings"]))
 
 
 class MainWindow(QMainWindow):
@@ -189,9 +189,10 @@ class MainWindow(QMainWindow):
         self.v2ray_pid = None
         self.tproxy_active = False
 
-        # ── 进程管理器 ────────────────────────────
-        app_root = Path(get_app_root())
-        self.openvpn_mgr, self.xray_mgr = create_managers(app_root)
+        # ── 进程管理器（普通权限，按需提权）────────
+        app_root = Path(get_app_root())  
+        self._proc_mgr = ProcessManager(app_root)
+        
 
         # ── 窗口图标 ──────────────────────────────
         self._window_icon = load_window_icon(str(app_root))
@@ -654,7 +655,7 @@ class MainWindow(QMainWindow):
             return
         self._refresh_buttons(starting=True)
         self._set_vpn_status("正在启动...", "#FF9800")
-        self._vpn_worker = OpenVPNWorker(self.vpn_config_path, self.openvpn_mgr)
+        self._vpn_worker = OpenVPNWorker(self.vpn_config_path, self._proc_mgr)
         self._vpn_worker.update_signal.connect(
             lambda m: self._set_vpn_status(m, "#FF9800"))
         self._vpn_worker.error_signal.connect(self._on_vpn_error)
@@ -680,7 +681,7 @@ class MainWindow(QMainWindow):
         self.stop_vpn_button.setEnabled(False)
         self._set_vpn_status("正在停止...", "#FF9800")
         try:
-            self.openvpn_mgr.stop()
+            self._proc_mgr.send_command({"action": "stop_openvpn"})
             self.vpn_pid = None
             self._set_vpn_status("未连接", "#999")
             self._refresh_buttons()
@@ -705,7 +706,7 @@ class MainWindow(QMainWindow):
         self._set_v2ray_status("正在启动...", "#FF9800")
         tproxy_enabled = self.tproxy_checkbox.isChecked() and not IS_WINDOWS
         self._v2ray_worker = XrayWorker(
-            self.v2ray_config_path, self.xray_mgr, tproxy_enabled)
+            self.v2ray_config_path, self._proc_mgr, tproxy_enabled)
         self._v2ray_worker.update_signal.connect(
             lambda m: self._set_v2ray_status(m, "#FF9800"))
         self._v2ray_worker.error_signal.connect(self._on_v2ray_error)
@@ -734,7 +735,7 @@ class MainWindow(QMainWindow):
         self.stop_v2ray_button.setEnabled(False)
         self._set_v2ray_status("正在停止...", "#FF9800")
         try:
-            self.xray_mgr.stop()
+            self._proc_mgr.send_command({"action": "stop_xray"})
             self.v2ray_pid = None
             self._set_v2ray_status("未连接", "#999")
             self._refresh_buttons()
@@ -788,8 +789,7 @@ class MainWindow(QMainWindow):
             self.v2ray_config_imported and self.v2ray_config_path.exists()) else None
 
         self._combined_worker = CombinedWorker(
-            self.openvpn_mgr, self.xray_mgr,
-            ovpn_cfg, xray_cfg, tproxy_enabled)
+            self._proc_mgr, ovpn_cfg, xray_cfg, tproxy_enabled)
         self._combined_worker.update_signal.connect(self._on_combined_update)
         self._combined_worker.error_signal.connect(self._on_combined_error)
         self._combined_worker.success_signal.connect(self._on_combined_started)
@@ -850,17 +850,20 @@ class MainWindow(QMainWindow):
             return
         self.stop_all_button.setEnabled(False)
         try:
+            # 先更新所有"正在停止"状态
             if self.v2ray_pid:
                 self._set_v2ray_status("正在停止...", "#FF9800")
-                self.xray_mgr.stop()
-                self.v2ray_pid = None
-                self._set_v2ray_status("未连接", "#999")
-
             if self.vpn_pid:
                 self._set_vpn_status("正在停止...", "#FF9800")
-                self.openvpn_mgr.stop()
-                self.vpn_pid = None
-                self._set_vpn_status("未连接", "#999")
+
+            # 只发送一次 stop_all 指令
+            self._proc_mgr.send_command({"action": "stop_all"})
+
+            # 统一清除 pid 和更新状态
+            self.v2ray_pid = None
+            self.vpn_pid = None
+            self._set_v2ray_status("未连接", "#999")
+            self._set_vpn_status("未连接", "#999")
 
             self._refresh_buttons()
             QMessageBox.information(self, "成功", "所有服务已停止")
@@ -884,6 +887,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply == QMessageBox.Yes:
                 self.stop_combined()
+                self._proc_mgr.stop_helper()
                 event.accept()
             else:
                 event.ignore()

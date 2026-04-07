@@ -4,7 +4,7 @@ Linux 图标处理实现。
 """
 from PyQt5.QtGui import QIcon
 
-from core.platform.base import IconHandler
+from core.multiplatform.base import IconHandler
 
 
 class LinuxIconHandler(IconHandler):

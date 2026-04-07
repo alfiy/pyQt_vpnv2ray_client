@@ -5,7 +5,7 @@ Linux 代理管理实现。
 """
 from typing import Dict, Tuple
 
-from core.platform.base import ProxyManager
+from core.multiplatform.base import ProxyManager
 
 
 class LinuxProxyManager(ProxyManager):
@@ -25,7 +25,7 @@ class LinuxProxyManager(ProxyManager):
             table (int): 路由表编号，默认 100
         """
         # 延迟导入，避免循环依赖
-        from core.platform.linux.privilege import LinuxPrivilegeHandler
+        from core.multiplatform.linux.privilege import LinuxPrivilegeHandler
 
         handler = LinuxPrivilegeHandler()
         if not handler.check_available():
@@ -61,7 +61,7 @@ class LinuxProxyManager(ProxyManager):
 
         kwargs: 同 start_proxy
         """
-        from core.platform.linux.privilege import LinuxPrivilegeHandler
+        from core.multiplatform.linux.privilege import LinuxPrivilegeHandler
 
         handler = LinuxPrivilegeHandler()
         if not handler.check_available():

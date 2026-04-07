@@ -4,7 +4,7 @@ Windows 平台路径常量。
 import os
 import sys
 
-from core.platform.base import PlatformPaths
+from core.multiplatform.base import PlatformPaths
 
 
 def _app_root() -> str:

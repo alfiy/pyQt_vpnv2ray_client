@@ -7,7 +7,7 @@ import os
 import subprocess
 import tempfile
 
-from core.platform.base import ShellHelper
+from core.multiplatform.base import ShellHelper
 
 
 class WindowsShellHelper(ShellHelper):

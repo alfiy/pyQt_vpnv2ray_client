@@ -4,7 +4,7 @@ Linux 平台路径常量。
 """
 import os
 
-from core.platform.base import PlatformPaths
+from core.multiplatform.base import PlatformPaths
 
 
 class LinuxPaths(PlatformPaths):

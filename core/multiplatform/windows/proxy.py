@@ -11,7 +11,7 @@ import subprocess
 import time
 from typing import Dict, Tuple
 
-from core.platform.base import ProxyManager
+from core.multiplatform.base import ProxyManager
 
 
 CREATE_NO_WINDOW = 0x08000000
@@ -28,7 +28,7 @@ class WindowsProxyManager(ProxyManager):
     """
 
     def __init__(self):
-        from core.platform.windows.paths import WindowsPaths
+        from core.multiplatform.windows.paths import WindowsPaths
         self._paths = WindowsPaths()
 
     def get_proxy_type(self) -> str:
@@ -226,6 +226,6 @@ class WindowsProxyManager(ProxyManager):
 
     def _is_xray_running(self) -> bool:
         """检查 xray 进程是否在运行。"""
-        from core.platform.windows.process_manager import WindowsProcessManager
+        from core.multiplatform.windows.process_manager import WindowsProcessManager
         pm = WindowsProcessManager()
         return pm.find_process_by_name("xray.exe") is not None

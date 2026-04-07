@@ -6,8 +6,8 @@ import os
 import subprocess
 from typing import Dict, Tuple
 
-from core.platform.base import PrivilegeHandler
-from core.platform.linux.paths import LinuxPaths
+from core.multiplatform.base import PrivilegeHandler
+from core.multiplatform.linux.paths import LinuxPaths
 
 
 class LinuxPrivilegeHandler(PrivilegeHandler):

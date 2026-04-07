@@ -10,12 +10,12 @@ Windows 平台实现模块。
 - WindowsShellHelper: Shell 辅助工具
 """
 
-from core.platform.windows.paths import WindowsPaths
-from core.platform.windows.privilege import WindowsPrivilegeHandler
-from core.platform.windows.process_manager import WindowsProcessManager
-from core.platform.windows.proxy import WindowsProxyManager
-from core.platform.windows.icon import WindowsIconHandler
-from core.platform.windows.shell_helper import WindowsShellHelper
+from core.multiplatform.windows.paths import WindowsPaths
+from core.multiplatform.windows.privilege import WindowsPrivilegeHandler
+from core.multiplatform.windows.process_manager import WindowsProcessManager
+from core.multiplatform.windows.proxy import WindowsProxyManager
+from core.multiplatform.windows.icon import WindowsIconHandler
+from core.multiplatform.windows.shell_helper import WindowsShellHelper
 
 __all__ = [
     "WindowsPaths",

@@ -26,7 +26,7 @@ Windows 权限提升实现。
 import os
 from typing import Dict, Optional, Tuple
 
-from core.platform.base import PrivilegeHandler
+from core.multiplatform.base import PrivilegeHandler
 
 # vpn_process.py 与本文件同属项目根目录
 # 如果你的 privilege.py 位于 core/platform/windows/，需要调整相对导入路径
@@ -44,7 +44,7 @@ except ImportError:
 class WindowsPrivilegeHandler(PrivilegeHandler):
 
     def __init__(self):
-        from core.platform.windows.paths import WindowsPaths
+        from core.multiplatform.windows.paths import WindowsPaths
         self._paths = WindowsPaths()
 
         # 创建进程管理器（懒初始化，首次调用时构建）

@@ -6,7 +6,7 @@ import os
 import subprocess
 from typing import Optional
 
-from core.platform.base import ProcessManager
+from core.multiplatform.base import ProcessManager
 
 
 # Windows 进程创建标志

@@ -3,7 +3,7 @@
 根据运行时操作系统自动选择对应的平台实现。
 
 使用方式:
-    from core.platform import get_privilege_handler, get_process_manager, \
+    from core.multiplatform import get_privilege_handler, get_process_manager, \
                               get_proxy_manager, get_icon_handler, get_shell_helper
 
 每个 get_xxx() 返回对应平台的具体实现实例，均遵循 base.py 中定义的抽象接口。
@@ -39,64 +39,64 @@ def is_linux() -> bool:
 
 def get_privilege_handler():
     """获取当前平台的权限提升处理器。"""
-    from core.platform.base import PrivilegeHandler
+    from core.multiplatform.base import PrivilegeHandler
     if is_windows():
-        from core.platform.windows.privilege import WindowsPrivilegeHandler
+        from core.multiplatform.windows.privilege import WindowsPrivilegeHandler
         return WindowsPrivilegeHandler()
     else:
-        from core.platform.linux.privilege import LinuxPrivilegeHandler
+        from core.multiplatform.linux.privilege import LinuxPrivilegeHandler
         return LinuxPrivilegeHandler()
 
 
 def get_process_manager():
     """获取当前平台的进程管理器。"""
-    from core.platform.base import ProcessManager
+    from core.multiplatform.base import ProcessManager
     if is_windows():
-        from core.platform.windows.process_manager import WindowsProcessManager
+        from core.multiplatform.windows.process_manager import WindowsProcessManager
         return WindowsProcessManager()
     else:
-        from core.platform.linux.process_manager import LinuxProcessManager
+        from core.multiplatform.linux.process_manager import LinuxProcessManager
         return LinuxProcessManager()
 
 
 def get_proxy_manager():
     """获取当前平台的代理管理器。"""
-    from core.platform.base import ProxyManager
+    from core.multiplatform.base import ProxyManager
     if is_windows():
-        from core.platform.windows.proxy import WindowsProxyManager
+        from core.multiplatform.windows.proxy import WindowsProxyManager
         return WindowsProxyManager()
     else:
-        from core.platform.linux.proxy import LinuxProxyManager
+        from core.multiplatform.linux.proxy import LinuxProxyManager
         return LinuxProxyManager()
 
 
 def get_icon_handler():
     """获取当前平台的图标处理器。"""
-    from core.platform.base import IconHandler
+    from core.multiplatform.base import IconHandler
     if is_windows():
-        from core.platform.windows.icon import WindowsIconHandler
+        from core.multiplatform.windows.icon import WindowsIconHandler
         return WindowsIconHandler()
     else:
-        from core.platform.linux.icon import LinuxIconHandler
+        from core.multiplatform.linux.icon import LinuxIconHandler
         return LinuxIconHandler()
 
 
 def get_shell_helper():
     """获取当前平台的 Shell 辅助工具。"""
-    from core.platform.base import ShellHelper
+    from core.multiplatform.base import ShellHelper
     if is_windows():
-        from core.platform.windows.shell_helper import WindowsShellHelper
+        from core.multiplatform.windows.shell_helper import WindowsShellHelper
         return WindowsShellHelper()
     else:
-        from core.platform.linux.shell_helper import LinuxShellHelper
+        from core.multiplatform.linux.shell_helper import LinuxShellHelper
         return LinuxShellHelper()
 
 
 def get_paths():
     """获取当前平台的路径常量。"""
     if is_windows():
-        from core.platform.windows.paths import WindowsPaths
+        from core.multiplatform.windows.paths import WindowsPaths
         return WindowsPaths()
     else:
-        from core.platform.linux.paths import LinuxPaths
+        from core.multiplatform.linux.paths import LinuxPaths
         return LinuxPaths()

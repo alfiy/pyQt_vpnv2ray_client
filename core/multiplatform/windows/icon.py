@@ -12,7 +12,7 @@ from PyQt5.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QPainterPath
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 
-from core.platform.base import IconHandler
+from core.multiplatform.base import IconHandler
 
 
 class WindowsIconHandler(IconHandler):
