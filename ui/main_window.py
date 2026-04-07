@@ -35,7 +35,7 @@ from core.config_manager import (
     load_imported_flags, save_imported_flags,
     load_tproxy_config, save_tproxy_config,
     extract_tproxy_config_from_v2ray, init_config_dir,
-    has_real_vps_config, validate_v2ray_config,
+    has_real_vps_config,
     import_vpn_config, import_v2ray_config,
     get_user_vpn_config_path, get_user_v2ray_config_path,
 )
