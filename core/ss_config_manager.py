@@ -196,6 +196,7 @@ class SSUrlParser:
                 print(f"[解析] 服务器信息格式错误: {server_part}")
                 return None
             
+            server_part = server_part.split("/")[0].strip()
             if server_part.startswith("[") and "]:" in server_part:
                 # IPv6: [::1]:8080
                 server.address, port_str = server_part.rsplit(":", 1)
@@ -234,7 +235,7 @@ class SSUrlParser:
         if not input_text:
             return servers
         
-        urls = re.findall(r'ss://[^\s,]+', input_text)
+        urls = re.findall(r'ss://[^\s,\'"]+', input_text)
         
         for url in urls:
             server = SSUrlParser.parse(url)
